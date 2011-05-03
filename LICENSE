@@ -1,0 +1,18 @@
+This module implements a way to interconnect pike with PlugWise modules.
+The module was not written by Plugwise B.V. nor are there any connections 
+between the author and Plugwise B.V. 
+
+
+Copyright (c) 2009-2010, Marc Dirix, The Netherlands.
+                         <marc@electronics-design.nl>
+
+This script is open source software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License as published
+by the Free Software Foundation; either version 2, or (at your option) any
+later version.
+
+The author would like to thank Maarten Damen for his effort in
+reverse engineering the protocol.
+http://www.maartendamen.com/category/plugwise-unleashed/
+
+

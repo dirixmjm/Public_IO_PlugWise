@@ -1,0 +1,4 @@
+0.2 on 07.04.2011
+	- Added support for retrieving the plug time 
+	- Added support for synchronizing the plug time and date.
+0.1 Initial version.

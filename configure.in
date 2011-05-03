@@ -1,0 +1,6 @@
+AC_INIT()
+
+AC_MODULE_INIT()
+
+AC_OUTPUT(Makefile)
+AC_CONFIG_HEADERS(acconfig.h.in)
