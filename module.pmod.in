@@ -67,7 +67,11 @@ class Protocol
          }
       }
       if ( !sizeof(acknowledge) || !has_value(i_acknowledge,acknowledge) )
-         error("ACK: Command Failed with %O, expected %O\n",acknowledge,i_acknowledge);
+      {
+         return "";
+         error("ACK: Command Failed with %O, expected %O maccaddress %s\n",acknowledge,i_acknowledge,macaddress);
+         //error("ACK: Command Failed with %O, expected %O\n",acknowledge,i_acknowledge);
+      }
       return data;
    }
  
@@ -287,6 +291,7 @@ class Plug
    int online = 0;
    int logaddress = 0;
    string hwversion="";
+   protected int logclock = 0;
 
    void close()
    {
@@ -326,7 +331,19 @@ class Plug
          return; 
       power_calibrate();
    }
-   
+   protected int YMMtoUnix(string YMM)
+   {
+      //Format is Year_Month_MonthMinute
+      int year, month, minutes;
+      werror("%O\n",YMM);
+      sscanf(YMM,"%2x%2x%4x",year,month,minutes);
+      year+=2000;
+      if(!month ||  month > 12 )
+         return 0;
+      return Calendar.Year(year)->set_timezone("GMT")->month(month)->minute(minutes)->unix_time();
+
+   }
+
    protected void power_calibrate()
    {
       string data = proto->command("0026","0027",mac, "00C1" );
@@ -337,7 +354,7 @@ class Plug
       }
       sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
    }
- 
+
    //! Retrieve the plug current clock in unix time.
    //! @param sync
    //! synchronize clock before returning
@@ -350,26 +367,30 @@ class Plug
          online=0;
          return 0;
       }
-      int hour,minutes,seconds,dow;
-      sscanf(data[..7],"%2x%2x%2x%2x",hour,minutes,seconds,dow);
-      plugtime = Calendar.parse("%e:%h:%m:%s:%z", sprintf("%d:%d:%d:%d:GMT",dow,hour,minutes,seconds))->unix_time();
+      int hour,minute,second,dow;
+      sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
+      plugtime = Calendar.Day("unix", logclock)->set_timezone("GMT")->hour(hour)->minute(minute)->second(second)->unix_time();
+#ifdef PW_PROTOCOL_DEBUG
+      write("Plug Time: %d %d\n",plugtime,time(1)); 
+#endif
       //Synchronize if requested, or the time difference is larger then 60 seconds.
-      if(sync || abs(plugtime-time()) >= 60 )
+      if(sync || abs(plugtime-time(1)) >= 60 )
       {
+         object a = Stdio.FILE("/home/marc/plugwise","awc");
+         a->write("%d: plugtime %d\n",time(1),plugtime); 
          mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
-         int year = cdate->year-2000;
-         int month_minute = (cdate->day-1)*24+cdate->hour*60+cdate->minute;
+         int yr = cdate->year-2000;
+         int month_minute = (cdate->day-1)*24*60+cdate->hour*60+cdate->minute;
          string towrite = sprintf("%02X%02X%04XFFFFFFFF%02X%02X%02X%02X",
-                                  year,cdate->month,month_minute,
+                                  yr,cdate->month,month_minute,
                                   cdate->hour,cdate->minute,cdate->second,
                                   cdate->week_day);
+         a->write("plug: %s data: %s towrite: %O\n",mac,data,towrite);
          string data = proto->command("0016",({"0000","00D7"}), mac, "00C1" , towrite);
-         if(!sizeof(data))
-         {
-            online=0;
-            return -1;
-         }
-         return cdate->unix;
+         a->close();
+         //Re-read the plug clock
+         info();
+         return clock(0);
       }
       return plugtime;
    }
@@ -387,6 +408,7 @@ class Plug
       }
       online=1;
       //FIXME First bytes should return some date info, but not for my plug.
+      logclock = YMMtoUnix(data[0..7]);
       sscanf(data[8..15],"%x",logaddress);
       logaddress= (logaddress - 278528 ) / 32;
       switch(data[16..17])
@@ -478,17 +500,17 @@ class Plug
       int log = logaddress;
       if(intp(addr))
          log=addr;
-      string data = proto->command("0048","0049", mac, "00C2" , sprintf("%08X",(addr*32+278528)));
+      string data = proto->command("0048","0049", mac, "00C1" , sprintf("%08X",(addr*32+278528)));
       if(!sizeof(data))
       {
          online=0;
          return ({});
       }
-      array x = array_sscanf(data,"%8x%8x%8x%8x%8x%8x%8x%8x%8x");
-      return ({ ([ "hour":1180659600 + x[0]*60*60,"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
-                ([ "hour":1180659600+ x[2]*60*60,"pulses":pulse_correction(x[3],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600) ) ]), 
-                ([ "hour":1180659600+ x[4]*60*60,"pulses":pulse_correction(x[5],3600), "kwh": pulse_to_kwh(pulse_correction(x[5],3600) ) ]), 
-                ([ "hour":1180659600+ x[6]*60*60,"pulses":pulse_correction(x[7],3600), "kwh": pulse_to_kwh(pulse_correction(x[7],3600) ) ]) });
+      array x = array_sscanf(data,"%8s%8x%8s%8x%8s%8x%8s%8x%8x");
+      return ({ ([ "hour":YMMtoUnix(x[0]),"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
+                ([ "hour":YMMtoUnix(x[2]),"pulses":pulse_correction(x[3],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600) ) ]), 
+                ([ "hour":YMMtoUnix(x[4]),"pulses":pulse_correction(x[5],3600), "kwh": pulse_to_kwh(pulse_correction(x[5],3600) ) ]), 
+                ([ "hour":YMMtoUnix(x[6]),"pulses":pulse_correction(x[7],3600), "kwh": pulse_to_kwh(pulse_correction(x[7],3600) ) ]) });
       logaddress = (x[8] - 278528) / 32;
    } 
    //! Find other Plugs in the Network
