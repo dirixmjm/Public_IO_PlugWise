@@ -368,7 +368,7 @@ class Plug
       }
       int hour,minute,second,dow;
       sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
-      plugtime = Calendar.Day("unix", logclock)->set_timezone("GMT")->hour(hour)->minute(minute)->second(second)->unix_time();
+      plugtime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
 #ifdef PW_PROTOCOL_DEBUG
       write("Plug Time: %d %d\n",plugtime,time(1)); 
 #endif
