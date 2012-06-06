@@ -1,6 +1,6 @@
 // -*- Pike -*-
-// Copyright (c) 2009-2010, Marc Dirix, The Netherlands.
-//                         <marc@electronics-design.nl>
+// Copyright (c) 2009-2011, Marc Dirix, The Netherlands.
+//                         <marc@dirix.nu>
 //
 // This script is open source software; you can redistribute it and/or
 // modify it under the terms of the GNU General Public License as published
@@ -12,371 +12,506 @@
 // between the author and Plugwise B.V. 
 
 #pike __REAL_VERSION__
-constant __version="0.1";
-constant __author="Marc Dirix <marc@electronics-design.nl";
+constant __version="1.0";
+constant __author="Marc Dirix <marc@dirix.nu>";
 constant __components=({"Public.pmod/IO.pmod/PlugWise.pmod"});
+
+
+protected class _Stick
+{
+
 
 #define HEAD "\5\5\3\3"
 #define FOOT "\r\n"
 #define PPW_PROTOCOL_DEBUG
 #define PPW_PROTOCOL_DEBUG_LOW
+#define RESEND 1
+#define COMMANDTIMEOUT 1
+#define ACKTIMEOUT 5
+
+protected Thread.Mutex lock;
+protected Stdio.File sock = Stdio.File();
+protected int blocking = 1;
+protected object CirclePlus;
+protected string StickMac="";
+
+mapping Plugs = ([]);
+mapping Plug_Callbacks = ([]);
+
+protected string receive_buffer="";
 
 
 
-class Protocol
+void create( string port, int|void non_blocking )
 {
-   Stdio.File sock = Stdio.FILE();
-   Thread.Mutex lock;
-   protected int commandcounter_on = 1;
 
-   protected string retanswer(string|array expectcommand, string macaddress, string|array ack )
+   if( non_blocking ) 
+      blocking = 0;
+
+   if(!sock->open(port,"rw"))
+      error("Can't open port %s\n",port);
+
+   if(!sock->tcsetattr(
+   ([ 
+"BRKINT": 0,"CLOCAL": 1,"CREAD": 1,"CRTSCTS": 0,  "CSTOPB": 0,  "ECHO": 0,  "ECHOCTL": 0,  "ECHOE": 0,  "ECHOK": 0,  "ECHOKE": 0,  "ECHONL": 0,  "ECHOPRT": 0,  "FLUSHO": 0,  "HUPCL": 1,  "ICANON": 0,  "ICRNL": 0,  "IGNBRK": 0,  "IGNCR": 0,  "IGNPAR": 1,  "IMAXBEL": 0,  "INLCR": 0,  "INPCK": 0,  "ISIG": 0,  "ISTRIP": 0,  "IUCLC": 0,  "IXANY": 0,  "IXOFF": 0,  "IXON": 0,  "NOFLSH": 0,  "OCRNL": 0,  "OFDEL": 0,  "OFILL": 0,  "OLCUC": 0,  "ONLCR": 0,  "ONLRET": 0,  "ONOCR": 0,  "OPOST": 0,  "PARENB": 0,  "PARMRK": 0,  "PARODD": 0,  "PENDIN": 0,  "TOSTOP": 0,  "VDISCARD": 15,  "VEOF": 4,  "VEOL": 0,  "VEOL2": 0,  "VERASE": 127,  "VINTR": 3,  "VKILL": 21,  "VLNEXT": 22,  "VMIN": 1,  "VQUIT": 28,  "VREPRINT": 18,  "VSTART": 17,  "VSTOP": 19,  "VSUSP": 26,  "VSWTC": 0,  "VTIME": 10,  "VWERASE": 23,  "XCASE": 0,  "columns": 0,  "csize": 8,  "columns": 0,  "csize": 8,  "ispeed": 115200,  "ospeed": 115200,  "rows": 0      
+   ])
+      ))
    {
-      string acknowledge, data="";
-      array i_acknowledge;
-      if( stringp(ack) )
-         i_acknowledge = ({ack});
+      error("Failed to initialize serial port\n");
+   }
+   if( non_blocking ) 
+   {
+      blocking = 0;
+      sock->set_nonblocking(low_answer,0,0);
+      call_out(send_command,0,"","000A");
+   }
+
+   //INIT USB Stick
+}
+
+void set_plug_receive_callback( string macaddress, function callback )
+{
+   Plug_Callbacks += ([ macaddress: callback ]);
+}
+
+void low_answer( mixed id, string message )
+{
+   receive_buffer+=message;
+
+   //Find newline in the buffer
+   int bufferpointer = search(receive_buffer,"\n");
+   while( bufferpointer > 0 )
+   {
+      string line = receive_buffer[..bufferpointer-1 ];
+      receive_buffer=receive_buffer[bufferpointer+1..];
+      bufferpointer = search(receive_buffer,"\n");
+
+      if(has_prefix( line, "\203" ))
+         line = line[1..];
+      if(has_suffix( line, "\r" ) )
+         line -= "\r"; 
+      
+      //The stick sends data that we don't use.
+      if(!has_prefix(line, HEAD) )
+         continue;
+
+      //Remove the HEAD
+      line = line[4..];
+#ifdef PW_PROTOCOL_DEBUG_LOW
+      werror("%O\n",line);
+#endif
+      //FIXME is there a better check if it is a message or an ACK?
+      int command=0;
+      sscanf(line,"%4x",command);
+      if( command == 0 )
+      {
+         //ACK Check it
+      }
       else 
-         i_acknowledge = ack;
-      while(sock->peek(3) )
       {
-         string message = sock->read(1);
-         if ( message == "\203" )
-            continue;
-         message += sock->gets();
-#ifdef PW_PROTOCOL_DEBUG_LOW
-            write("Received: %O\n",message);
-#endif
-         if ( sizeof(message) && has_prefix(message,HEAD) )
-         {
-            //Remove HEAD
-            if( has_prefix(message,"\203\5\5\3\3") )
-               message = message[5..]; 
-            else
-               message = message[4..];
-            //Remove Tail
-            message -= "\r";
+         //COMMAND CALLOUT?
+         seperate_data(line);
+      }
+   }
+}
+
+void seperate_data( string message ) 
+{
+   int crc=0;
+   //Set the stringpointer on the end of the first command.
+   int command = -1;
+   sscanf(message[..3],"%4x",command);
+   //FIXME Error?
+   if( command == -1 )
+      return;
+   string commandcounter = message[4..7];
+   //FIXME command2
+   string macaddr = message[8..23];
+   string payload = message[24..(strlen(message)-5)];
+   //Extract CRC
+   sscanf(message[(strlen(message)-4)..],"%4x",crc);
+   if ( crc != Public.Crypto.CRC.CRC16X()->calcstring(message[..(strlen(message)-5)]))
+   {
+      //FIXME Error Callback?
 #ifdef PW_PROTOCOL_DEBUG
-            write("Received: %O\n",message);
+      werror("CRC Checksum failed on received data\n");
 #endif
-            //Check if this is DATA or ACK.
-            if ( sizeof(message) < 20 )
-               acknowledge = getack(message);
-            else 
-               data = getdata(message, expectcommand, macaddress );
-
-         }
-      }
-      if ( !sizeof(acknowledge) || !has_value(i_acknowledge,acknowledge) )
-      {
-         return "";
-         error("ACK: Command Failed with %O, expected %O maccaddress %s\n",acknowledge,i_acknowledge,macaddress);
-         //error("ACK: Command Failed with %O, expected %O\n",acknowledge,i_acknowledge);
-      }
-      return data;
+      pendingcommand->time=0;
+      low_send();
+      return;
    }
- 
-   string getack(string ack)
-   {
-      int status=0;
-
-      int crc = 0;
-      sscanf(ack[(strlen(ack)-4)..],"%04x",crc);
-      if ( Public.Crypto.CRC.CRC16X()->calcstring(ack[..(strlen(ack)-5)]) == crc)
-      {
-         return ack[(strlen(ack)-8)..(strlen(ack)-5)];
-      }
-      else
-         error("ACK CRC Check %04X %04XFailed on ACK\n",crc, 
-               Public.Crypto.CRC.CRC16X()->calcstring(ack[..(strlen(ack)-5)]));
-      //Check to correct commandcounter_on if possible
-      if( sizeof(ack) <  16 )
-         commandcounter_on = 0;
-      else
-         commandcounter_on = 1;
-   }
-
-   protected string getdata(string message, string|array expectcommand, string macaddress )
-   {
-      string i_macaddress="",i_command,i_command2,payload="";
-      string command, command2;
-      int crc=0;
-      if ( stringp(expectcommand) )
-         command = expectcommand;
-      else
-      {
-         command = expectcommand[0];
-         command2 = expectcommand[1];
-      }
-      int stringpointer = strlen(command);
-      i_command = message[..stringpointer-1];
-      if( i_command != command )
-      {
-         //FIXME Maybe not error, but continue?
-         //error("Received Spurious Answer: %O!=%O \n",i_command,command );
-         return "";
-      }
-      if( commandcounter_on == 1 )
-      {
-         // Adjust stringpointer past the commandcount, don't need the value.
-         stringpointer+=4;
-      }
-      if ( command2 )
-      {
-         i_command2 = message[stringpointer..strlen(command2)-1];
-         if( i_command2 != command2 )
-         {
-            //Maybe a commandcounter issue?
-            if ( commandcounter_on )
-               stringpointer-=4;
-            else
-               stringpointer+=4;
-            i_command2 = message[stringpointer..strlen(command2)-1];
-            //if it is found, toggle commandcounter_on.
-            if ( i_command2 == command2)
-               commandcounter_on = !commandcounter_on;
-            else
-               return "";
-         }
-         stringpointer+=strlen(command2);
-      }
-      i_macaddress = message[stringpointer..stringpointer+15];
-      if( sizeof(macaddress) && i_macaddress != macaddress)
-      {
-         //Maybe a commandcounter issue?
-         if ( commandcounter_on )
-            stringpointer-=4;
-         else
-            stringpointer+=4;
-         i_macaddress = message[stringpointer..stringpointer+15];
-         if( i_macaddress == macaddress)
-               commandcounter_on = !commandcounter_on;
-            else
-               return "";
-      }
-      payload=message[stringpointer+16..(strlen(message)-5)];
-      sscanf(message[(strlen(message)-4)..],"%4x",crc);
-      if ( crc != Public.Crypto.CRC.CRC16X()->calcstring(message[..(strlen(message)-5)]))
-               error("CRC Checksum failed on received data\n");
-       return payload;
-   }
-
-   string command( string request, string|array answer, string macaddress, string|array ack, string|void data)
-   {
-      string payload="";
-      if(stringp(data))
-         payload=data;
 #ifdef PW_PROTOCOL_DEBUG
-      write("Send: %O\n", request + macaddress + payload + 
-                  sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(
-                                                request+macaddress+payload)));
+      werror("Received: %O\n",message);
 #endif
- 
-#ifdef PW_PROTOCOL_DEBUG_LOW
-      write("Send: %O\n", HEAD + request + macaddress + payload + 
-                  sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(
-                                       request+macaddress+payload))+ FOOT);
-#endif
-      Thread.MutexKey lockit  = lock->lock();
-      sock->write(HEAD + request + macaddress + payload +
-                  sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(
-                                           request+macaddress+payload))+ FOOT);
-      return retanswer( answer, macaddress, ack );
-   }
-   
-   void create( string port )
+   //FIXME call_out, if non-blocking?
+   receive_callback(macaddr, command, payload);
+
+   //Answer received, reset the command timer and send next command
+   pendingcommand->time=0;
+   low_send();
+}
+
+mapping pendingcommand = ([]);
+array transmitqueue = ({});
+
+void send_command( string macaddress, string request, string|void data)
+{
+   transmitqueue += ({ ([ "mac": macaddress, "request":request, "data": data?data:"" ]) });
+   low_send();
+}
+
+void low_send()
+{
+   //Check if another command is pending.
+   if( pendingcommand->time > time() )
    {
-         lock = Thread.Mutex();
-         if(!sock->open(port,"rw"))
-            error("Can't open port %s\n",port);
-         if(!sock->tcsetattr(
-         ([ /* 65 elements */
-  "BRKINT": 0,
-  "CLOCAL": 1,
-  "CREAD": 1,
-  "CRTSCTS": 0,
-  "CSTOPB": 0,
-  "ECHO": 0,
-  "ECHOCTL": 0,
-  "ECHOE": 0,
-  "ECHOK": 0,
-  "ECHOKE": 0,
-  "ECHONL": 0,
-  "ECHOPRT": 0,
-  "FLUSHO": 0,
-  "HUPCL": 1,
-  "ICANON": 0,
-  "ICRNL": 0,
-  "IGNBRK": 0,
-  "IGNCR": 0,
-  "IGNPAR": 1,
-  "IMAXBEL": 0,
-  "INLCR": 0,
-  "INPCK": 0,
-  "ISIG": 0,
-  "ISTRIP": 0,
-  "IUCLC": 0,
-  "IXANY": 0,
-  "IXOFF": 0,
-  "IXON": 0,
-  "NOFLSH": 0,
-  "OCRNL": 0,
-  "OFDEL": 0,
-  "OFILL": 0,
-  "OLCUC": 0,
-  "ONLCR": 0,
-  "ONLRET": 0,
-  "ONOCR": 0,
-  "OPOST": 0,
-  "PARENB": 0,
-  "PARMRK": 0,
-  "PARODD": 0,
-  "PENDIN": 0,
-  "TOSTOP": 0,
-  "VDISCARD": 15,
-  "VEOF": 4,
-  "VEOL": 0,
-  "VEOL2": 0,
-  "VERASE": 127,
-  "VINTR": 3,
-  "VKILL": 21,
-  "VLNEXT": 22,
-  "VMIN": 1,
-  "VQUIT": 28,
-  "VREPRINT": 18,
-  "VSTART": 17,
-  "VSTOP": 19,
-  "VSUSP": 26,
-  "VSWTC": 0,
-  "VTIME": 10,
-  "VWERASE": 23,
-  "XCASE": 0,
-  "columns": 0,
-  "csize": 8,
-  "columns": 0,
-  "csize": 8,
-  "ispeed": 115200,
-  "ospeed": 115200,
-  "rows": 0
-           ])
-         ))
-      {
-          error("Failed to initialize serial port\n");
-      }
-      //INIT USB Stick
+      return;
+   }
+
+   remove_call_out(receive_timeout);
+   //Check if another command is queued
+   if( !sizeof( transmitqueue ) )
+   {
+      return;
+   }
+
+   //pop command from queue
+   string request = transmitqueue[0]->request;
+   string payload = transmitqueue[0]->data;
+   string macaddress = transmitqueue[0]->mac;
+   pendingcommand = transmitqueue[0] + ([ "time": time() + COMMANDTIMEOUT ]);
+
+   //Start the next command in case the plug is offline
+
+   transmitqueue = transmitqueue[1..];
+
 #ifdef PW_PROTOCOL_DEBUG
-      write("Command: 000A" + 
-                  sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(                                                "000A"))+ FOOT);
+   write("Send: %O\n", request + macaddress + payload +
+               sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(
+                                             request+macaddress+payload)));
 #endif
-      sock->write(HEAD+"000A" + 
-                  sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring("000A")) + FOOT);
-     string ret = retanswer( "0011", "", "00C1" );
-   }
 
-   void close()
+   sock->write(HEAD + request + macaddress + payload +
+               sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(
+                                        request+macaddress+payload))+ FOOT);
+
+   //FIXME if ACK fails do next command.
+   if( ! blocking ) 
    {
-      sock->close();
+      call_out( receive_timeout, COMMANDTIMEOUT );
+      if( sizeof(receive_buffer) )
+      {
+         call_out(low_answer,0,0,"");
+      }
    }
+  /*
+   else if ( commandcount )
+      wait_answer( commandcount );
+  */
+}
 
+void close()
+{
+   sock->close();
+}
+
+protected void receive_timeout( )
+{
+#ifdef PW_PROTOCOL_DEBUG
+   werror("Receive Timeout for Plug: %s\n",pendingcommand->mac);
+#endif
+   pendingcommand->time = 0;
+   Plugs[pendingcommand->mac]->offline();
+   //Send next command
+   low_send();
 }
 
 
-class Plug
+protected void receive_callback( string mac, int command, string data )
 {
-   Protocol proto;
-   protected string mac;
-   protected float gain_a=0.0,gain_b=0.0,offtot=0.0,offnoise=0.0;
-   int netfrequency =  0;
-   int powerstate = 0;
-   int builddate = 0;
-   int online = 0;
-   int logaddress = 0;
-   string hwversion="";
-   protected int logclock = 0;
-
-   void close()
+   switch(command)
    {
-      proto->close();
-      destruct(proto);
-      destruct(this);
+      case 0:
+         werror("Isn't this an acknowledge? %d\n",command);
+         break;
+      case 17:
+         //Stick Init Return Command, contains Stick Mac, Circle+ Mac
+         StickMac = mac;
+         string maccircleplus;
+         sscanf(data,"%6*s%14s%*s",maccircleplus);
+         maccircleplus = "00" + maccircleplus;
+         CirclePlus = _Plug(maccircleplus, this, 1);
+         //CirclePlus->find_plugs();
+         Plugs+= ([ maccircleplus:CirclePlus ]);
+         break;
+      //FIXME Is it reasonable to catch this at this level, or
+      //should the circleplus get the data
+      case 25:
+         sscanf(data,"%16s%*s",string maccircle);
+         if( has_prefix(maccircle, "F") )
+            break;
+         Plugs+= ([ maccircle: _Plug(maccircle, this, 0 ) ]);
+         break;
+      default:
+         if( mac == StickMac )
+         {
+            werror("Received data for Unknown Command %d for Stick\n", command);
+            werror("Data %O\n",data);
+         }
+         if( !has_index( Plugs, mac ) )
+         {
+            werror("Received data for Unknown Plug: %s\n",mac);
+            werror("Command %d Data %O\n",command,data);
+            return;
+         }
+         Plug_Callbacks[mac](command, data);
    }
+}
+}
 
-   //! Connect to a Plug in the PlugWise network.
-   //! Plugs have to be added to the network using the 
-   //! Microsoft windows tool provide by PlugWise B.V.
-   //! The Source.
-   //! 
-   //! @param port
-   //! Either a string containing the serial port device
-   //! i.e. "/dev/USB0" or the Protocol object returned from
-   //! earlier instantations of this PlugWise Network
-   //! make sure to reuse the Protocol object if possible
-   //! @param macaddress
-   //! The mac address of the plug, either the 5 byte, 6 byte or
-   //! full 16 byte mac works.
-   void create(string|Protocol port, string macaddress)
+_Stick `()(string port, int|void non_blocking ) 
+{
+   return _Stick( port, non_blocking );
+}
+
+protected class _Plug
+{
+protected object Stick;
+protected string mac;
+protected int circleplus = 0;
+protected float gain_a=0.0,gain_b=0.0,offtot=0.0,offnoise=0.0;
+
+int netfrequency =  0;
+int powerstate = 0;
+int builddate = 0;
+int online = 0;
+protected int plugtime = 0;
+
+protected float pulse;
+
+string hwversion="";
+protected int logclock = 0;
+//Pointerr to the address of the current powerlog
+int powerlogpointer = 0;
+//Address of the last powerlog
+int logaddress = 0;
+protected array last_powerlog = ({});
+protected function powerlog_callback = 0;
+
+void close()
+{
+   destruct(this);
+}
+
+//! Connect to a Plug in the PlugWise network.
+//! Plugs have to be added to the network using the 
+//! Microsoft windows tool provide by PlugWise B.V.
+//! The Source.
+//! 
+//! @param port
+//! The Protocol object returned from
+//! earlier instantations of this PlugWise Network
+//! make sure to reuse the Protocol object if possible
+//! @param macaddress
+//! The mac address of the plug, either the 5 byte, 6 byte or
+//! full 16 byte mac works.
+void create(string macaddress, object _stick, int|void plus)
+{
+   mac = macaddress;
+   Stick = _stick;
+   Stick->set_plug_receive_callback( macaddress, receive_callback );
+   info();
+   power_calibrate();
+   circleplus=plus;
+   if( plus )
+      find_plugs();   
+}
+
+protected int YMMtoUnix(string YMM)
+{
+   //Format is Year_Month_MonthMinute
+   int year, month, minutes;
+   sscanf(YMM,"%2x%2x%4x",year,month,minutes);
+   year+=2000;
+   if(!month ||  month > 12 )
+      return 0;
+   return Calendar.Year(year)->set_timezone("GMT")->month(month)->minute(minutes)->unix_time();
+
+}
+
+protected void power_calibrate()
+{
+   Stick->send_command(mac, "0026" );
+   //sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
+}
+
+//! Retrieve the plug current clock in unix time.
+//! @param sync
+//! synchronize clock before returning
+void clock( )
+{
+   string data = Stick->send_command(mac, "003E", "" );
+}
+
+void offline()
+{
+   online = 0;
+}
+   
+//! Refresh the Plug info. No data is returned here, only the internal
+//! representation of the Plug status like online,powerstate,time
+//! net frequency and hardware version are recollected from the plug.
+void info()
+{
+   Stick->send_command(mac, "0023" );
+} 
+
+  
+protected float pulse_correction(int pulse, int timespan)
+{
+   float pulses = pulse *1.0 / timespan;
+   pulses = (timespan * (((pow(pulses / 1.0 + offnoise, 2.0) * gain_b) + 
+                    ((pulses / 1.0 + offnoise) * gain_a)) + offtot));
+   //return (pulses<0)?0.0:pulses;
+   return pulses;
+}
+
+protected float pulse_to_watt(float pulse)
+{
+   return pulse * 1000/468.9385193;
+}
+   
+protected float pulse_to_kwh(float pulse)
+{
+   return pulse /3600 /468.9385193;
+}
+ 
+//! Returns the logged power load on the plug.
+//! The load on the plug is logged per hour in sets of four. 
+//! Each log entry contains the total Pulses in the hour, so 
+//! in order to get the power use the formula:
+//! Pulses / 3600 / 468.9385193
+//!
+//! @param addr
+//! the logaddress  which needs to be queried. The current logaddress
+//! is Plug->logaddress. This however points to the current not completed 
+//! log.
+//! @param callback
+//! This function is called when the power log is returned from the plug
+//! @returns 
+//! a  is returned containing 4 one-hour logs. 
+//! These must not be consecutive. Each mapping contains the 
+//! unix time and the number of pulses.
+array powerlog( int|void addr)
+{
+   //info();
+   int log = zero_type(addr)?powerlogpointer:addr;
+   Stick->send_command(mac, "0048",sprintf("%08X",(log*32+278528)));
+   return last_powerlog;
+} 
+
+void set_powerlog_callback( function callback )
+{
+   powerlog_callback = callback;
+}
+
+void remove_powerlog_callback()
+{
+   powerlog_callback = 0;
+}
+
+//! Find other Plugs in the Network
+//! Keep in mind this only works for the Circle+
+//!
+//! @returns
+//! array containing all found plugs. If non are found, or the plug is
+//! not a Circle+ an empty array is returned. 
+void find_plugs()
+{
+   if(!circleplus)
+      return;
+
+   int count;
+   array res=({});
+   for(count = 0; count <= 0x3F; count++)
    {
-      if ( sizeof(macaddress) == 5)
-         mac = "000D6F00003"+ macaddress;
-      else if ( sizeof(macaddress) == 6)
-         mac = "000D6F0000"+ macaddress;
-      else
-         mac = macaddress;
-      if(stringp(port))
-         proto = Protocol(port);
-      else
-         proto=port;
-
-      info();
-      if(!online)
-         return; 
-      power_calibrate();
+//         string data = Stick->send_command(mac, "0018",sprintf("%02X",count));
+      Stick->send_command(mac, "0018",sprintf("%02X",count));
    }
-   protected int YMMtoUnix(string YMM)
-   {
-      //Format is Year_Month_MonthMinute
-      int year, month, minutes;
-      sscanf(YMM,"%2x%2x%4x",year,month,minutes);
-      year+=2000;
-      if(!month ||  month > 12 )
-         return 0;
-      return Calendar.Year(year)->set_timezone("GMT")->month(month)->minute(minutes)->unix_time();
+} 
 
-   }
+//! Switches the plug on.
+//! info() is called internally, to update the state. No acknowledge 
+//! is provided.
+void on()
+{
+   Stick->send_command(mac,"0017", "01");
+   //Update info
+   info();
+}
 
-   protected void power_calibrate()
+//! Switches the plug off.
+//! info() is called internally, to update the state. 
+//! No acknowledge is provided.
+void off()
+{
+   Stick->send_command(mac, "0017", "00");
+   //Update info
+   info();
+}
+
+protected void receive_callback(int command, string data )
+{
+   //FIXME How do I detect if a plug goes offline?
+   online=1;
+   switch( command )
    {
-      string data = proto->command("0026","0027",mac, "00C1" );
-      if(!sizeof(data))
+   case 19:
+      int val=0,val1=0;
+      sscanf(data,"%04x%04x",val,val1);
+      pulse = pulse_correction(val, 1);
+      break;
+   case 36:
+      //FIXME First bytes should return some date info, but not for my plug.
+      logclock = YMMtoUnix(data[0..7]);
+      sscanf(data[8..15],"%x",powerlogpointer);
+      powerlogpointer= (powerlogpointer - 278528 ) / 32;
+      switch(data[16..17])
       {
-         online=0;
-         return;
+      case "01":
+         powerstate=1;
+         break;
+      case "00":
+         powerstate=0;
       }
+      switch(data[18..19])
+      {
+      case "85":
+         netfrequency=50;
+         break;
+      case "C5":
+         netfrequency=60;
+         break;
+      default:
+         netfrequency=0;
+      }
+      hwversion=data[20..31];
+      sscanf(data[32..37],"%x",builddate);
+      clock();
+      break;
+
+   case 39:
       sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
-   }
-
-   //! Retrieve the plug current clock in unix time.
-   //! @param sync
-   //! synchronize clock before returning
-   int clock( int|void sync )
-   {
-      int plugtime;
-      string data = proto->command("003E","003F",mac, "00C1" );
-      if(!sizeof(data))
-      {
-         online=0;
-         return 0;
-      }
+      break;
+   case 63:   
       int hour,minute,second,dow;
       sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
       plugtime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
 #ifdef PW_PROTOCOL_DEBUG
       write("Plug Time: %d %d\n",plugtime,time(1)); 
 #endif
-      //Synchronize if requested, or the time difference is larger then 60 seconds.
-      if(sync || abs(plugtime-time(1)) >= 60 )
+      if(abs(plugtime-time(1)) >= 60 )
       {
-         object a = Stdio.FILE("/home/marc/plugwise","awc");
-         a->write("%d: plugtime %d\n",time(1),plugtime); 
          mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
          int yr = cdate->year-2000;
          int month_minute = (cdate->day-1)*24*60+cdate->hour*60+cdate->minute;
@@ -384,178 +519,37 @@ class Plug
                                   yr,cdate->month,month_minute,
                                   cdate->hour,cdate->minute,cdate->second,
                                   cdate->week_day);
-         a->write("plug: %s data: %s towrite: %O\n",mac,data,towrite);
-         string data = proto->command("0016",({"0000","00D7"}), mac, "00C1" , towrite);
-         a->close();
+         string data = Stick->send_command(mac, "0016", towrite);
          //Re-read the plug clock
          info();
-         return clock(0);
+         clock();
       }
-      return plugtime;
-   }
-
-   //! Refresh the Plug info. No data is returned here, only the internal
-   //! representation of the Plug status like online,powerstate,time
-   //! net frequency and hardware version are recollected from the plug.
-   void info()
-   {
-      string data = proto->command("0023","0024",mac,"00C1" );
-      if(!sizeof(data))
-      {
-         online=0;
-         return;
-      }
-      online=1;
-      //FIXME First bytes should return some date info, but not for my plug.
-      logclock = YMMtoUnix(data[0..7]);
-      sscanf(data[8..15],"%x",logaddress);
-      logaddress= (logaddress - 278528 ) / 32;
-      switch(data[16..17])
-      {
-         case "01":
-            powerstate=1;
-            break;
-         case "00":
-            powerstate=0;
-      }
-      switch(data[18..19])
-      {
-         case "85":
-            netfrequency=50;
-            break;
-         case "C5":
-            netfrequency=60;
-            break;
-         default:
-            netfrequency=0;
-      }
-      hwversion=data[20..31];
-      sscanf(data[32..37],"%x",builddate);
-      clock();
-   } 
-
-   //! Returns the current powerload off the plug. 
-   //! 
-   //! @param watt
-   //! when non-zero power returns the information in Watt otherwise in Pulses.
-   //!  Watt = Pulses * 1000 / 468.9385193
-   //! @returns
-   //! powerload in Pulses or Watt
-   int|float power( int|void watt )
-   {
-      string data = proto->command("0012","0013",mac,"00C1" );
-      if(!sizeof(data))
-      {
-         online=0;
-         return 0;
-      }
-      int val=0,val1=0;
-      sscanf(data,"%04x%04x",val,val1);
-      float power = pulse_correction(val, 1);
-      if(!watt)
-         return power;
-      else
-         return pulse_to_watt(power);
-   } 
-  
-   protected float pulse_correction(int pulse, int timespan)
-   {
-      float pulses = pulse *1.0 / timespan;
-      pulses = (timespan * (((pow(pulses / 1.0 + offnoise, 2.0) * gain_b) + 
-                       ((pulses / 1.0 + offnoise) * gain_a)) + offtot));
-      //return (pulses<0)?0.0:pulses;
-      return pulses;
-   }
-
-   protected float pulse_to_watt(float pulse)
-   {
-      return pulse * 1000/468.9385193;
-   }
-   
-   protected float pulse_to_kwh(float pulse)
-   {
-      return pulse /3600 /468.9385193;
-   }
- 
-   //! Returns the logged power load on the plug.
-   //! The load on the plug is logged per hour in sets of four. 
-   //! Each log entry contains the total Pulses in the hour, so 
-   //! in order to get the power use the formula:
-   //! Pulses / 3600 / 468.9385193
-   //!
-   //! @param addr
-   //! the logaddress  which needs to be queried. The current logaddress
-   //! is Plug->logaddress. This however points to the current not completed 
-   //! log.
-   //! @returns 
-   //! a array(mapping) is returned containing 4 one-hour logs. 
-   //! These must not be consecutive. Each mapping contains the 
-   //! unix time and the number of pulses.
-   array power_log(int|void addr)
-   {
-      info();
-      if(!online)
-         return ({});
-      int log = logaddress;
-      if(intp(addr))
-         log=addr;
-      string data = proto->command("0048","0049", mac, "00C1" , sprintf("%08X",(addr*32+278528)));
-      if(!sizeof(data))
-      {
-         online=0;
-         return ({});
-      }
+      break;
+      case 73:
       array x = array_sscanf(data,"%8s%8x%8s%8x%8s%8x%8s%8x%8x");
-      return ({ ([ "hour":YMMtoUnix(x[0]),"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
-                ([ "hour":YMMtoUnix(x[2]),"pulses":pulse_correction(x[3],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600) ) ]), 
-                ([ "hour":YMMtoUnix(x[4]),"pulses":pulse_correction(x[5],3600), "kwh": pulse_to_kwh(pulse_correction(x[5],3600) ) ]), 
-                ([ "hour":YMMtoUnix(x[6]),"pulses":pulse_correction(x[7],3600), "kwh": pulse_to_kwh(pulse_correction(x[7],3600) ) ]) });
-      logaddress = (x[8] - 278528) / 32;
-   } 
-   //! Find other Plugs in the Network
-   //! Keep in mind this only works for the Circle+
-   //!
-   //! @returns
-   //! array containing all found plugs. If non are found, or the plug is
-   //! not a Circle+ an empty array is returned. 
-   array find_plugs()
-   {
-      //FIXME only allow this with a Circle+
-      int count;
-      array res=({});
-
-      for(count = 0; count <= 0x3F; count++)
-      {
-         string data = proto->command("0018","0019",mac,"00C1",sprintf("%02X",count));
-         if(!sizeof(data))
-         {
-            online=0;
-            return ({});
-         }
-         sscanf(data,"%16s%*s",string pmac);
-         if(pmac != "FFFFFFFFFFFFFFFF")
-            res+=({pmac});
-      }
-      return res;
-   } 
-
-   //! Switches the plug on.
-   //! info() is called internally, to update the state. No acknowledge 
-   //! is provided.
-   void on()
-   {
-      proto->command("0017", ({"0000","00D8"}), mac, ({"00C1","00E1" }), "01");
-      //Update info
-      info();
+      int logaddress = (x[8] - 278528) / 32;
+      array last_powerlog = ({ ([ "hour":YMMtoUnix(x[0]),"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
+             ([ "hour":YMMtoUnix(x[2]),"pulses":pulse_correction(x[3],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600) ) ]), 
+             ([ "hour":YMMtoUnix(x[4]),"pulses":pulse_correction(x[5],3600), "kwh": pulse_to_kwh(pulse_correction(x[5],3600) ) ]), 
+             ([ "hour":YMMtoUnix(x[6]),"pulses":pulse_correction(x[7],3600), "kwh": pulse_to_kwh(pulse_correction(x[7],3600) ) ]) });
+      if( powerlog_callback )
+         powerlog_callback( last_powerlog, logaddress );
+      break;
+      default:
+         werror("Received Unknown Command %d\n",command);
    }
+}
 
-   //! Switches the plug off.
-   //! info() is called internally, to update the state. 
-   //! No acknowledge is provided.
-   void off()
-   {
-      proto->command("0017", ({"0000","00DE"}), mac, ({"00C1","00E1"}) , "00");
-      //Update info
-      info();
-   }
+//! Returns the current powerload off the plug. 
+//! in nonblocking mode the last known value is returned.
+//! @param pulses
+//! when non-zero power returns the information in Pulses otherwise in Watt.
+//!  Watt = Pulses * 1000 / 468.9385193
+//! @returns
+//! powerload in Pulses or Watt
+float power( int|void pulses )
+{
+      Stick->send_command(mac, "0012" );
+      return pulses?pulse:pulse_to_watt(pulse);
+}
 }
