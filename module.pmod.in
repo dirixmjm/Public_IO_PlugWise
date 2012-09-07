@@ -212,6 +212,8 @@ void low_send()
 
 void close()
 {
+   remove_call_out(receive_timeout);
+   remove_call_out(send_command);
    sock->close();
 }
 
