@@ -32,7 +32,7 @@ protected class _Stick
 protected Thread.Mutex lock;
 protected Stdio.File sock = Stdio.File();
 protected int blocking = 1;
-protected object CirclePlus;
+object CirclePlus;
 protected string StickMac="";
 
 mapping Plugs = ([]);
@@ -244,7 +244,7 @@ protected void receive_callback( string mac, int command, string data )
          maccircleplus = "00" + maccircleplus;
          CirclePlus = _Plug(maccircleplus, this, 1);
          //CirclePlus->find_plugs();
-         Plugs+= ([ maccircleplus:CirclePlus ]);
+         Plugs[ maccircleplus] = CirclePlus;
          break;
       //FIXME Is it reasonable to catch this at this level, or
       //should the circleplus get the data
@@ -252,7 +252,7 @@ protected void receive_callback( string mac, int command, string data )
          sscanf(data,"%16s%*s",string maccircle);
          if( has_prefix(maccircle, "F") )
             break;
-         Plugs+= ([ maccircle: _Plug(maccircle, this, 0 ) ]);
+         Plugs[maccircle]= _Plug(maccircle, this, 0 );
          break;
       default:
          if( mac == StickMac )
@@ -294,7 +294,7 @@ protected float pulse;
 string hwversion="";
 protected int logclock = 0;
 //Pointerr to the address of the current powerlog
-int powerlogpointer = 0;
+protected int logpointer = 0;
 //Address of the last powerlog
 int logaddress = 0;
 protected array last_powerlog = ({});
@@ -357,6 +357,7 @@ void clock( )
 
 void offline()
 {
+   pulse = 0.0;
    online = 0;
 }
    
@@ -407,10 +408,16 @@ protected float pulse_to_kwh(float pulse)
 array powerlog( int|void addr)
 {
    //info();
-   int log = zero_type(addr)?powerlogpointer:addr;
+   int log = zero_type(addr)?logpointer:addr;
    Stick->send_command(mac, "0048",sprintf("%08X",(log*32+278528)));
    return last_powerlog;
 } 
+
+int powerlogpointer()
+{
+   info();
+   return logpointer;
+}
 
 void set_powerlog_callback( function callback )
 {
@@ -473,11 +480,12 @@ protected void receive_callback(int command, string data )
       sscanf(data,"%04x%04x",val,val1);
       pulse = pulse_correction(val, 1);
       break;
+   //return code from info() command.
    case 36:
       //FIXME First bytes should return some date info, but not for my plug.
       logclock = YMMtoUnix(data[0..7]);
-      sscanf(data[8..15],"%x",powerlogpointer);
-      powerlogpointer= (powerlogpointer - 278528 ) / 32;
+      sscanf(data[8..15],"%x",logpointer);
+      logpointer= (logpointer - 278528 ) / 32;
       switch(data[16..17])
       {
       case "01":
