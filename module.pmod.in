@@ -23,7 +23,7 @@ protected class _Stick
 
 #define HEAD "\5\5\3\3"
 #define FOOT "\r\n"
-#define PPW_PROTOCOL_DEBUG
+#define PW_PROTOCOL_DEBUG
 #define PPW_PROTOCOL_DEBUG_LOW
 #define RESEND 1
 #define COMMANDTIMEOUT 1
@@ -63,11 +63,17 @@ void create( string port, int|void non_blocking )
    {
       blocking = 0;
       sock->set_nonblocking(low_answer,0,0);
-      call_out(send_command,0,"","000A");
+      call_out(send_command,0,"",10);
    }
 
    //INIT USB Stick
 }
+
+void find_plugs()
+{
+   call_out(send_command,0,"",8);
+}
+
 
 void set_plug_receive_callback( string macaddress, function callback )
 {
@@ -105,6 +111,7 @@ void low_answer( mixed id, string message )
       sscanf(line,"%4x",command);
       if( command == 0 )
       {
+         werror("Line %O\n",line);
          //ACK Check it
       }
       else 
@@ -154,9 +161,10 @@ void seperate_data( string message )
 mapping pendingcommand = ([]);
 array transmitqueue = ({});
 
-void send_command( string macaddress, string request, string|void data)
+void send_command( string macaddress, string|int request, string|void data)
 {
-   transmitqueue += ({ ([ "mac": macaddress, "request":request, "data": data?data:"" ]) });
+   string req = stringp(request)?request:sprintf("%04X",request);
+   transmitqueue += ({ ([ "mac": macaddress, "request":req, "data": data?data:"" ]) });
    low_send();
 }
 
@@ -182,7 +190,7 @@ void low_send()
    pendingcommand = transmitqueue[0] + ([ "time": time() + COMMANDTIMEOUT ]);
 
    //Start the next command in case the plug is offline
-
+   werror("%O\n",pendingcommand);
    transmitqueue = transmitqueue[1..];
 
 #ifdef PW_PROTOCOL_DEBUG
@@ -235,7 +243,21 @@ protected void receive_callback( string mac, int command, string data )
    {
       case 0:
          werror("Isn't this an acknowledge? %d\n",command);
-         break;
+      break;
+      //A device wants to join?
+      case 6:
+      {
+         send_command(mac, 7, "");
+         if( ! has_index( Plugs, mac ) )
+         {
+            Plugs[mac]= _Plug(mac, this, 0 );
+         }
+         else
+         {
+            Plugs[mac]->info();
+         }
+      }
+      break;
       case 17:
          //Stick Init Return Command, contains Stick Mac, Circle+ Mac
          StickMac = mac;
@@ -288,6 +310,7 @@ int powerstate = 0;
 int builddate = 0;
 int online = 0;
 protected int plugtime = 0;
+protected int lasttime = 0;
 
 protected float pulse;
 
@@ -343,7 +366,7 @@ protected int YMMtoUnix(string YMM)
 
 protected void power_calibrate()
 {
-   Stick->send_command(mac, "0026" );
+   Stick->send_command(mac, 38 );
    //sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
 }
 
@@ -352,7 +375,7 @@ protected void power_calibrate()
 //! synchronize clock before returning
 void clock( )
 {
-   string data = Stick->send_command(mac, "003E", "" );
+   string data = Stick->send_command(mac, 62, "" );
 }
 
 void offline()
@@ -366,9 +389,23 @@ void offline()
 //! net frequency and hardware version are recollected from the plug.
 void info()
 {
-   Stick->send_command(mac, "0023" );
+   Stick->send_command(mac, 35 );
 } 
 
+//! Test command
+void test( int command, string|void extra )
+{
+
+   Stick->send_command(mac, command, stringp(extra)?extra:"" );
+
+}
+
+//! Check if the Circle Is Registered
+//!
+void isregistered( string reg_mac )
+{
+   Stick->send_command(mac, 28, reg_mac);
+}
   
 protected float pulse_correction(int pulse, int timespan)
 {
@@ -409,7 +446,7 @@ array powerlog( int|void addr)
 {
    //info();
    int log = zero_type(addr)?logpointer:addr;
-   Stick->send_command(mac, "0048",sprintf("%08X",(log*32+278528)));
+   Stick->send_command(mac, 72,sprintf("%08X",(log*32+278528)));
    return last_powerlog;
 } 
 
@@ -444,8 +481,8 @@ void find_plugs()
    array res=({});
    for(count = 0; count <= 0x3F; count++)
    {
-//         string data = Stick->send_command(mac, "0018",sprintf("%02X",count));
-      Stick->send_command(mac, "0018",sprintf("%02X",count));
+//         string data = Stick->send_command(mac, 24,sprintf("%02X",count));
+      Stick->send_command(mac, 24,sprintf("%02X",count));
    }
 } 
 
@@ -454,7 +491,7 @@ void find_plugs()
 //! is provided.
 void on()
 {
-   Stick->send_command(mac,"0017", "01");
+   Stick->send_command(mac,23, "01");
    //Update info
    info();
 }
@@ -464,7 +501,7 @@ void on()
 //! No acknowledge is provided.
 void off()
 {
-   Stick->send_command(mac, "0017", "00");
+   Stick->send_command(mac, 23, "00");
    //Update info
    info();
 }
@@ -476,12 +513,18 @@ protected void receive_callback(int command, string data )
    switch( command )
    {
    case 19:
+   {
       int val=0,val1=0;
       sscanf(data,"%04x%04x",val,val1);
       pulse = pulse_correction(val, 1);
       break;
+   }
    //return code from info() command.
+   case 29:
+      werror("Received 001D with %O\n",data);
+      break;
    case 36:
+   {
       //FIXME First bytes should return some date info, but not for my plug.
       logclock = YMMtoUnix(data[0..7]);
       sscanf(data[8..15],"%x",logpointer);
@@ -508,18 +551,31 @@ protected void receive_callback(int command, string data )
       hwversion=data[20..31];
       sscanf(data[32..37],"%x",builddate);
       clock();
-      break;
-
+   }
+   break;
    case 39:
       sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
-      break;
-   case 63:   
-      int hour,minute,second,dow;
-      sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
-      plugtime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
+   break;
+   case 58:
+   {
+      int hour,minute,second,dow,dom,month,year;
+      sscanf(data,"%2d%2d%2d%2d%2d%2d%2d",second,minute,hour,dow,dom,month,year);
+      plugtime = Calendar.parse("%s-%m-%h-%e-%D-%M-%y",sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year))->unix_time();;
 #ifdef PW_PROTOCOL_DEBUG
       write("Plug Time: %d %d\n",plugtime,time(1)); 
 #endif
+   }
+   break;
+   case 63:
+   {
+      //I Suspect this is a logvalue for the software to set the last log-time.   
+      int hour,minute,second,dow;
+      sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
+      lasttime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
+#ifdef PW_PROTOCOL_DEBUG
+      write("Plug Time: %d %d\n",plugtime,time(1)); 
+#endif
+      /*
       if(abs(plugtime-time(1)) >= 60 )
       {
          mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
@@ -529,13 +585,15 @@ protected void receive_callback(int command, string data )
                                   yr,cdate->month,month_minute,
                                   cdate->hour,cdate->minute,cdate->second,
                                   cdate->week_day);
-         string data = Stick->send_command(mac, "0016", towrite);
+         string data = Stick->send_command(mac, 22, towrite);
          //Re-read the plug clock
          info();
          clock();
       }
-      break;
-      case 73:
+      */
+   }
+   break;
+   case 73:
       array x = array_sscanf(data,"%8s%8x%8s%8x%8s%8x%8s%8x%8x");
       int logaddress = (x[8] - 278528) / 32;
       array last_powerlog = ({ ([ "hour":YMMtoUnix(x[0]),"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
@@ -547,6 +605,7 @@ protected void receive_callback(int command, string data )
       break;
       default:
          werror("Received Unknown Command %d\n",command);
+         werror("Data %s\n",data);
    }
 }
 
@@ -559,7 +618,7 @@ protected void receive_callback(int command, string data )
 //! powerload in Pulses or Watt
 float power( int|void pulses )
 {
-      Stick->send_command(mac, "0012" );
+      Stick->send_command(mac, 18 );
       return pulses?pulse:pulse_to_watt(pulse);
 }
 }
