@@ -231,6 +231,7 @@ protected void receive_timeout( )
    werror("Receive Timeout for Plug: %s\n",pendingcommand->mac);
 #endif
    pendingcommand->time = 0;
+   //werror("%O\n",pendingcommand->mac);
    Plugs[pendingcommand->mac]->offline();
    //Send next command
    low_send();
@@ -272,9 +273,8 @@ protected void receive_callback( string mac, int command, string data )
       //should the circleplus get the data
       case 25:
          sscanf(data,"%16s%*s",string maccircle);
-         if( has_prefix(maccircle, "F") )
-            break;
-         Plugs[maccircle]= _Plug(maccircle, this, 0 );
+         if( !has_prefix(maccircle, "FFF") && !has_index(Plugs,maccircle ))
+            Plugs[maccircle]= _Plug(maccircle, this, 0 );
          break;
       default:
          if( mac == StickMac )
@@ -284,8 +284,15 @@ protected void receive_callback( string mac, int command, string data )
          }
          if( !has_index( Plugs, mac ) )
          {
-            werror("Received data for Unknown Plug: %s\n",mac);
-            werror("Command %d Data %O\n",command,data);
+            //We are probably searching for this plug, if we received
+            //an answer we should list the plug.
+            if( command == 36 )
+               Plugs[mac] = _Plug(mac, this, 0);
+            else
+            {
+               werror("Received data for Unknown Plug: %s\n",mac);
+               werror("Command %d Data %O\n",command,data);
+            }
             return;
          }
          Plug_Callbacks[mac](command, data);
@@ -472,16 +479,19 @@ void remove_powerlog_callback()
 //! @returns
 //! array containing all found plugs. If non are found, or the plug is
 //! not a Circle+ an empty array is returned. 
-void find_plugs()
+void find_plugs(string |void searchmac)
 {
    if(!circleplus)
       return;
-
+   if( stringp(searchmac) )
+   {
+      Stick->send_command(searchmac,35);
+      return;
+   }
    int count;
    array res=({});
    for(count = 0; count <= 0x3F; count++)
    {
-//         string data = Stick->send_command(mac, 24,sprintf("%02X",count));
       Stick->send_command(mac, 24,sprintf("%02X",count));
    }
 } 
