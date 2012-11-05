@@ -63,7 +63,7 @@ void create( string port, int|void non_blocking )
    {
       blocking = 0;
       sock->set_nonblocking(low_answer,0,0);
-      call_out(send_command,0,"","000A");
+      call_out(send_command,0,"",10);
    }
 
    //INIT USB Stick
@@ -154,9 +154,10 @@ void seperate_data( string message )
 mapping pendingcommand = ([]);
 array transmitqueue = ({});
 
-void send_command( string macaddress, string request, string|void data)
+void send_command( string macaddress, string|int request, string|void data)
 {
-   transmitqueue += ({ ([ "mac": macaddress, "request":request, "data": data?data:"" ]) });
+   string req = stringp(request)?request:sprintf("%04X",request);
+   transmitqueue += ({ ([ "mac": macaddress, "request":req, "data": data?data:"" ]) });
    low_send();
 }
 
@@ -223,6 +224,7 @@ protected void receive_timeout( )
    werror("Receive Timeout for Plug: %s\n",pendingcommand->mac);
 #endif
    pendingcommand->time = 0;
+   //werror("%O\n",pendingcommand->mac);
    Plugs[pendingcommand->mac]->offline();
    //Send next command
    low_send();
@@ -250,9 +252,8 @@ protected void receive_callback( string mac, int command, string data )
       //should the circleplus get the data
       case 25:
          sscanf(data,"%16s%*s",string maccircle);
-         if( has_prefix(maccircle, "F") )
-            break;
-         Plugs[maccircle]= _Plug(maccircle, this, 0 );
+         if( !has_prefix(maccircle, "FFF") && !has_index(Plugs,maccircle ))
+            Plugs[maccircle]= _Plug(maccircle, this, 0 );
          break;
       default:
          if( mac == StickMac )
@@ -262,8 +263,15 @@ protected void receive_callback( string mac, int command, string data )
          }
          if( !has_index( Plugs, mac ) )
          {
-            werror("Received data for Unknown Plug: %s\n",mac);
-            werror("Command %d Data %O\n",command,data);
+            //We are probably searching for this plug, if we received
+            //an answer we should list the plug.
+            if( command == 36 )
+               Plugs[mac] = _Plug(mac, this, 0);
+            else
+            {
+               werror("Received data for Unknown Plug: %s\n",mac);
+               werror("Command %d Data %O\n",command,data);
+            }
             return;
          }
          Plug_Callbacks[mac](command, data);
@@ -343,7 +351,7 @@ protected int YMMtoUnix(string YMM)
 
 protected void power_calibrate()
 {
-   Stick->send_command(mac, "0026" );
+   Stick->send_command(mac, 38 );
    //sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
 }
 
@@ -352,7 +360,7 @@ protected void power_calibrate()
 //! synchronize clock before returning
 void clock( )
 {
-   string data = Stick->send_command(mac, "003E", "" );
+   string data = Stick->send_command(mac, 62, "" );
 }
 
 void offline()
@@ -366,9 +374,17 @@ void offline()
 //! net frequency and hardware version are recollected from the plug.
 void info()
 {
-   Stick->send_command(mac, "0023" );
+   Stick->send_command(mac, 35 );
 } 
 
+//! Add a new plug to the network
+//!
+void add( string add_mac )
+{
+   if( sizeof(add_mac) == 6 )
+      mac = "000D6F0001" + mac;
+   string data = Stick->send_command(mac, 28, add_mac);
+}
   
 protected float pulse_correction(int pulse, int timespan)
 {
@@ -409,7 +425,7 @@ array powerlog( int|void addr)
 {
    //info();
    int log = zero_type(addr)?logpointer:addr;
-   Stick->send_command(mac, "0048",sprintf("%08X",(log*32+278528)));
+   Stick->send_command(mac, 72,sprintf("%08X",(log*32+278528)));
    return last_powerlog;
 } 
 
@@ -435,17 +451,20 @@ void remove_powerlog_callback()
 //! @returns
 //! array containing all found plugs. If non are found, or the plug is
 //! not a Circle+ an empty array is returned. 
-void find_plugs()
+void find_plugs(string |void searchmac)
 {
    if(!circleplus)
       return;
-
+   if( stringp(searchmac) )
+   {
+      Stick->send_command(searchmac,35);
+      return;
+   }
    int count;
    array res=({});
    for(count = 0; count <= 0x3F; count++)
    {
-//         string data = Stick->send_command(mac, "0018",sprintf("%02X",count));
-      Stick->send_command(mac, "0018",sprintf("%02X",count));
+      Stick->send_command(mac, 24,sprintf("%02X",count));
    }
 } 
 
@@ -454,7 +473,7 @@ void find_plugs()
 //! is provided.
 void on()
 {
-   Stick->send_command(mac,"0017", "01");
+   Stick->send_command(mac,23, "01");
    //Update info
    info();
 }
@@ -464,7 +483,7 @@ void on()
 //! No acknowledge is provided.
 void off()
 {
-   Stick->send_command(mac, "0017", "00");
+   Stick->send_command(mac, 23, "00");
    //Update info
    info();
 }
@@ -481,6 +500,9 @@ protected void receive_callback(int command, string data )
       pulse = pulse_correction(val, 1);
       break;
    //return code from info() command.
+   case 29:
+      werror("Received 001D with %O\n",data);
+      break;
    case 36:
       //FIXME First bytes should return some date info, but not for my plug.
       logclock = YMMtoUnix(data[0..7]);
@@ -529,7 +551,7 @@ protected void receive_callback(int command, string data )
                                   yr,cdate->month,month_minute,
                                   cdate->hour,cdate->minute,cdate->second,
                                   cdate->week_day);
-         string data = Stick->send_command(mac, "0016", towrite);
+         string data = Stick->send_command(mac, 22, towrite);
          //Re-read the plug clock
          info();
          clock();
@@ -559,7 +581,7 @@ protected void receive_callback(int command, string data )
 //! powerload in Pulses or Watt
 float power( int|void pulses )
 {
-      Stick->send_command(mac, "0012" );
+      Stick->send_command(mac, 18 );
       return pulses?pulse:pulse_to_watt(pulse);
 }
 }
