@@ -41,7 +41,6 @@ object CirclePlus;
 protected string StickMac="";
 
 mapping Plugs = ([]);
-mapping Plug_Callbacks = ([]);
 
 protected string receive_buffer="";
 
@@ -81,11 +80,6 @@ void open_plug_find()
 void close_plug_find()
 {
    send_command("",8,"00");
-}
-
-void set_plug_receive_callback( string macaddress, function callback )
-{
-   Plug_Callbacks += ([ macaddress: callback ]);
 }
 
 void low_answer( mixed id, string message )
@@ -264,7 +258,8 @@ protected void receive_timeout( )
 #ifdef PW_PROTOCOL_DEBUG
    werror("Receive Timeout for Plug: %s\n",pendingcommand->mac);
 #endif
-   Plugs[pendingcommand->mac]->offline();
+   if( has_index ( Plugs, pendingcommand->mac ) )
+      Plugs[pendingcommand->mac]->offline();
    //Send next command
    send_next();
 }
@@ -289,7 +284,7 @@ protected void low_receive_callback( string mac, int command, string data )
          int registered = (int) data[17];
          if( registered == 1 && ! has_index( Plugs, mac ) )
          {
-            Plugs[mac]= _Plug(mac, this, 0 );
+            Plugs[mac]= _Plug(mac, send_command, 0 );
          }
       }
       break;
@@ -306,10 +301,27 @@ protected void low_receive_callback( string mac, int command, string data )
          //If we don't have the switch in our plug package, add it.
          if( ! has_index( Plugs, mac ) )
          {
-            Plugs[mac]= _Switch(mac, this, 0 );
+            switch(data)
+            {
+               //01 is a Circle+ should not happen? 02 is a Circle
+               case "01":
+               case "02":
+                  Plugs[mac]= _Plug(mac, send_command, 0 );
+                  break;
+               case "03":
+                  Plugs[mac]= _Switch(mac, send_command, 0 );
+                  break;
+            // The switch sometimes just sends 00 instead of 03.
+            //   default:
+            //      werror("Unknown Plug Type %s\n",data[40..41]);
+            }
          }
          else
+         {
             Plugs[mac]->online = 1;
+            //Send an info command, in order to let it transmit de transmitqueue
+            Plugs[mac]->info();
+         }
       }
       break; 
       case 17:
@@ -319,7 +331,7 @@ protected void low_receive_callback( string mac, int command, string data )
          string maccircleplus;
          sscanf(data,"%6*s%14s%*s",maccircleplus);
          maccircleplus = "00" + maccircleplus;
-         CirclePlus = _Plug(maccircleplus, this, 1);
+         CirclePlus = _Plug(maccircleplus, send_command, 1);
          //CirclePlus->find_plugs();
          Plugs[ maccircleplus] = CirclePlus;
          break;
@@ -328,9 +340,40 @@ protected void low_receive_callback( string mac, int command, string data )
       {
          sscanf(data,"%16s%*s",string maccircle);
          if( !has_prefix(maccircle, "FFF") && !has_index(Plugs,maccircle ))
-            Plugs[maccircle]= _Plug(maccircle, this, 0 );
-         break;
+         {
+            send_command( maccircle, 35 );
+            //Don't add the plug just jet, just send an info command
+            //Plugs[maccircle]= _Plug(maccircle, send_command, 0 );
+         }
       }
+      break;
+      //Return from info command
+      case 36:
+      {
+         //If we get an info return, then the device must be in our network
+         //FIXME Check if this is a switch, scan or plug
+         if( ! has_index( Plugs, mac ) )
+         {
+         
+            switch(data[40..41])
+            {
+               //01 is a Circle+ should not happen? 02 is a Circle
+               case "01":
+               case "02":
+                  Plugs[mac]= _Plug(mac, send_command, 0 );
+                  break;
+               case "03":
+                  Plugs[mac]= _Switch(mac, send_command, 0 );
+                  break;
+               default:
+                  werror("Unknown Plug Type %s\n",data[40..41]);
+            }
+         }
+         else
+            Plugs[mac]->online = 1;
+         Plugs[mac]->receive_callback(command, data);
+      }
+      break;
       default:
       {
          if( mac == StickMac )
@@ -340,18 +383,10 @@ protected void low_receive_callback( string mac, int command, string data )
          }
          if( !has_index( Plugs, mac ) )
          {
-            //We are probably searching for this plug, if we received
-            //an answer we should list the plug.
-            if( command == 36 )
-               Plugs[mac] = _Plug(mac, this, 0);
-            else
-            {
-               //Check if the plug is registered
-               CirclePlus->isregistered( mac );
-            }
+            CirclePlus->isregistered( mac );
             return;
          }
-         Plug_Callbacks[mac](command, data);
+         Plugs[mac]->receive_callback(command, data);
        }
    }
 }
@@ -365,7 +400,7 @@ _Stick `()(string port, int|void non_blocking )
 protected class _Plug
 {
 
-protected object Stick;
+protected function send_command;
 protected string mac;
 int type = PLUG;
 protected int circleplus = 0;
@@ -406,11 +441,10 @@ void close()
 //! @param macaddress
 //! The mac address of the plug, either the 5 byte, 6 byte or
 //! full 16 byte mac works.
-void create(string macaddress, object _stick, int|void plus)
+void create(string macaddress, function _send_command, int|void plus)
 {
    mac = macaddress;
-   Stick = _stick;
-   Stick->set_plug_receive_callback( macaddress, receive_callback );
+   send_command = _send_command;
    info();
    circleplus=plus;
    if( plus )
@@ -431,7 +465,7 @@ protected int YMMtoUnix(string YMM)
 
 protected void power_calibrate()
 {
-   Stick->send_command(mac, 38 );
+   send_command(mac, 38 );
    //sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
 }
 
@@ -440,7 +474,7 @@ protected void power_calibrate()
 //! synchronize clock before returning
 void clock( )
 {
-   string data = Stick->send_command(mac, 62, "" );
+   string data = send_command(mac, 62, "" );
 }
 
 void offline()
@@ -454,14 +488,14 @@ void offline()
 //! net frequency and hardware version are recollected from the plug.
 void info()
 {
-   Stick->send_command(mac, 35 );
+   send_command(mac, 35 );
 } 
 
 //! Test command
 void test( int command, string|void extra )
 {
 
-   Stick->send_command(mac, command, stringp(extra)?extra:"" );
+   send_command(mac, command, stringp(extra)?extra:"" );
 
 }
 
@@ -469,7 +503,7 @@ void test( int command, string|void extra )
 //!
 void isregistered( string reg_mac )
 {
-   Stick->send_command(mac, 28, reg_mac);
+   send_command(mac, 28, reg_mac);
 }
   
 protected float pulse_correction(int pulse, int timespan)
@@ -505,7 +539,7 @@ void powerlog( int|void addr)
 {
    //info();
    int log = zero_type(addr)?logpointer:addr;
-   Stick->send_command(mac, 72,sprintf("%08X",(log*32+278528)));
+   send_command(mac, 72,sprintf("%08X",(log*32+278528)));
 } 
 
 int powerlogpointer()
@@ -536,14 +570,14 @@ void find_plugs(string |void searchmac)
       return;
    if( stringp(searchmac) )
    {
-      Stick->send_command(searchmac,35);
+      send_command(searchmac,35);
       return;
    }
    int count;
    array res=({});
    for(count = 0; count <= 0x3F; count++)
    {
-      Stick->send_command(mac, 24,sprintf("%02X",count));
+      send_command(mac, 24,sprintf("%02X",count));
    }
 } 
 
@@ -552,7 +586,7 @@ void find_plugs(string |void searchmac)
 //! is provided.
 void on()
 {
-   Stick->send_command(mac,23, "01");
+   send_command(mac,23, "01");
    //Update info
    info();
 }
@@ -562,11 +596,12 @@ void on()
 //! No acknowledge is provided.
 void off()
 {
-   Stick->send_command(mac, 23, "00");
+   send_command(mac, 23, "00");
    //Update info
    info();
 }
-protected void receive_callback(int command, string data )
+
+void receive_callback(int command, string data )
 {
    online=1;
    switch( command )
@@ -582,7 +617,6 @@ protected void receive_callback(int command, string data )
    case 36:
    {
       logclock = YMMtoUnix(data[0..7]);
-      sscanf(data[8..15],"%x",logpointer);
       switch(data[18..19])
       {
       case "85":
@@ -597,7 +631,8 @@ protected void receive_callback(int command, string data )
       hwversion=data[20..31];
       sscanf(data[32..37],"%x",builddate);
       
-      logpointer= (logpointer - 278528 ) / 32;
+      sscanf(data[8..15],"%x",int _logpointer);
+      logpointer= (_logpointer - 278528 ) / 32;
       switch(data[16..17])
       {
       case "01":
@@ -678,7 +713,7 @@ protected void receive_callback(int command, string data )
 //! powerload in Pulses or Watt
 float power( int|void pulses )
 {
-      Stick->send_command(mac, 18 );
+      send_command(mac, 18 );
       return pulses?pulse:pulse_to_watt(pulse);
 }
 }
@@ -686,7 +721,7 @@ float power( int|void pulses )
 protected class _Switch
 {
 
-protected object Stick;
+protected function send_command;
 protected string mac;
 int type = SWITCH;
 int netfrequency =  0;
@@ -705,12 +740,16 @@ void close()
    destruct(this);
 }
 
-void create(string macaddress, object _stick)
+void create(string macaddress, function _send_command)
 {
    mac = macaddress;
-   Stick = _stick;
-   Stick->set_plug_receive_callback( macaddress, receive_callback );
+   send_command = _send_command;
    info();
+}
+
+void offline()
+{
+   online = 0;
 }
 
 //! Refresh the Plug info. No data is returned here, only the internal
@@ -718,21 +757,38 @@ void create(string macaddress, object _stick)
 //! net frequency and hardware version are recollected from the plug.
 void info()
 {
-   Stick->send_command(mac, 35 );
+   send_command(mac, 35 );
 } 
 
-protected function switch_1;
-protected function switch_2;
+
+protected function switch_callback;
 
 void set_switch_callback( int switchnr, function callback)
 {
-   if( switchnr == 1 )
-     switch_1 = callback;
-   else
-     switch_2 = callback;
+   switch_callback = callback;
 }
-protected void receive_callback(int command, string data )
+
+protected array(mapping)  transmitqueue = ({});
+
+protected void send_queue()
 {
+   foreach ( transmitqueue, mapping command )
+   {
+      send_command(mac,command->command, command->data);
+   }
+}
+
+void set_wakeup_timer( int wakeup, int timeout )
+{
+   transmitqueue += ({ ([ "command":80,
+                          //FIXME What does the rest of this command mean?
+                          //FIXME timeout should be in this command?
+                          "data":sprintf("1%X00010003000000",wakeup)
+                       ]) });
+}
+void receive_callback(int command, string data )
+{
+   online = 1;
    switch( command )
    {
    //return code from info() command.
@@ -752,18 +808,13 @@ protected void receive_callback(int command, string data )
       hwversion=data[20..31];
       sscanf(data[32..37],"%x",builddate);
    }
+   //Since we're online, we can now transfer data we cached
+   send_queue();
    break;
    case 86:
    {
       sscanf(data,"%2x%2x", int switchnr, int onoff);
-      if ( switchnr == 1 && switch_1 )
-      {
-        switch_1(onoff); 
-      }
-      else if ( switchnr == 2 && switch_2 )
-      {
-        switch_2(onoff); 
-      }
+      switch_callback(switchnr,onoff); 
    }
    break;
    default:
