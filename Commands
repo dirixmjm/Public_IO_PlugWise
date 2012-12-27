@@ -1,0 +1,78 @@
+Read/Write	Hex	Dec	Description
+Read		0000	 0	Stick ACK
+Read		0000	 0	General ACK For Set Commands
+Read		0006	 6	Unassociated Plug Sends Mac
+Write		0007	 7	Add Plug To Network
+                                01 Accept, 00 Reject
+Write		0008	 8	Open Plug Find, detect unassociated plugs
+				01 Enable, 00 Disable
+Write		000A	10	Init Stick
+Write		000D		??
+Read		0011	17	Stick Returns Circle+ Mac on "000A".
+Write		0012	18	Request Plug Current Power Usage
+Read		0013	19	Response Plug Current Power Usage
+Write		0016	22	Set Plug Clock
+Write		0017	23	Plug Power On/Off
+				01 On, 00 Off
+Write		0018	24	Check for Associated Plugs that are online
+Read		0019	25	Circle+ Response to Plug Online Command
+Write		001C	28	Check with C+ if Plug is Associated
+Read		001D	29	Response Plug is Associated
+                                01 Associated, 00 Not Associated
+Write		0023	35	Request Plug Base Info
+Read		0024	36	Return data for Base Info Command
+Write		0026	38	Request Power Calibration Data
+Read		0027	39	Response Power Calibration Data
+Write		0029	41	Request Clock Data
+Read		003A	58	Plug Clock Data
+Write		003E	62	Request Plug Clock Setting
+Read		003F	63	Response Plug Clock 
+Write		0040    64	??
+                                data:0001
+Write		0045	69	Add switch broadcast to Plug, send twice
+                                data1: mac followed by 000000000000000001 or 2
+                                fixme position? Probably left/right switch.
+                                data: 90F85ED5171E 0001 000000000000000001
+                                                   0002 Number of positions written
+Write		0048	72	Request Plug PowerLog with Address.
+				Address = Logcount*32+278528
+Read		0049	73	Response Plug PowerLog
+				hour_pulses_hour_pulses_hour_pulses_hour_pulses
+Write		004A	74	??
+                                data:3C01
+Read		004F	79	Switch,Sense,Scan RF Active, 
+                                Data: 00,01,02,03
+Write		0050	80	Set Sense/Scan/Switch Wakeup time
+                                %2X Wakeup Duration
+                                %4X 0001 Unknown
+                                %4X 0003 Wakeup Interval in Minutes
+Read		0056	86	Switch Pressed Broadcast
+				00/01 Switch nr, 00/01 off/on
+Write		0057	87	??
+				data:003C0000
+Write		0058	88	Unassign?
+                                data: 01
+Write		005F	95	??
+Read		0060	96	?? Response to 005F
+                                "Maybe check for connected switch?"
+Read		0061	97	Plug Acknowledges Associated
+Read		0100	256	Sense ?? Check if temperature or Hydro switch?
+				data:00B3
+				data:00B5
+Write		0101	257	Set Scan Switch Settings
+			        %2x Sensitivity FF Off, 1E Medium, 14 High 
+                                %2x 00 Off, 01 Daylightdetection 
+                                %2x minute Switch Off Delay in minutes
+Write		0102	258	Calibrate Daylight detection
+Write		0103	259	Set Sense Wakeup interval
+				0F 15 minutes
+Write		0104	260	Set Sense Switch Hysteresis
+                                00 / 01 Humidity / Temperature
+                                Value High see 0105
+                                01 (High)
+                                Value Low see 0105
+                                00 (Low)
+Read		0105	261	Sense 
+                                %4X Humidity ,%4X Temperature
+                                Humidity = (%4X - 3145) / 524.30
+                                Temperature = (%4X - 17473) / 372.90

@@ -16,10 +16,11 @@ constant __version="1.0";
 constant __author="Marc Dirix <marc@dirix.nu>";
 constant __components=({"Public.pmod/IO.pmod/PlugWise.pmod"});
 
-#define PLUG 0
-#define SWITCH 1
-#define SCAN 2
-#define SENSE 3
+#define CIRCLEPLUS 0
+#define CIRCLE 1
+#define SWITCH 3
+#define SCAN 4
+#define SENSE 5
 
 
 protected class _Stick
@@ -36,21 +37,15 @@ protected class _Stick
 
 protected Thread.Mutex lock;
 protected Stdio.File sock = Stdio.File();
-protected int blocking = 1;
 object CirclePlus;
 protected string StickMac="";
 
-mapping Plugs = ([]);
+protected mapping Plugs = ([]);
 
 protected string receive_buffer="";
 
-
-
-void create( string port, int|void non_blocking )
+void create( string port )
 {
-
-   if( non_blocking ) 
-      blocking = 0;
 
    if(!sock->open(port,"rw"))
       error("Can't open port %s\n",port);
@@ -63,26 +58,12 @@ void create( string port, int|void non_blocking )
    {
       error("Failed to initialize serial port\n");
    }
-   if( non_blocking ) 
-   {
-      blocking = 0;
-      sock->set_nonblocking(low_answer,0,0);
-      send_command("",10);
-   }
+   sock->set_nonblocking(low_answer,0,0);
+   send_command("",10);
    //INIT USB Stick
 }
 
-void open_plug_find()
-{
-   send_command("",8,"01");
-}
-
-void close_plug_find()
-{
-   send_command("",8,"00");
-}
-
-void low_answer( mixed id, string message )
+protected void low_answer( mixed id, string message )
 {
    receive_buffer+=message;
 
@@ -114,7 +95,7 @@ void low_answer( mixed id, string message )
    }
 }
 
-void seperate_data( string message ) 
+protected void seperate_data( string message ) 
 {
    int crc=0;
    //Set the stringpointer on the end of the first command.
@@ -138,22 +119,16 @@ void seperate_data( string message )
       return;
    }
 
-   //This is an ACK
-   if( (command == 0) )
+   //This is an ACK from the Stick
+   if( (command == 0) && sizeof(message) == 16 )
    {
       //Stick reports error
       if ( !( (message[8..11] == "00C1") || 
-           (message[8..11] == "00E1") || 
-           (message[8..11] == "00D9") ) )
+           (message[8..11] == "00E1")
+           ))
       {
          werror("Stick Reports Error %O\n",message[8..11]);
          //Send next command
-         send_next();
-      }
-      //We this is the only answer we get to command 0 for searching plugs
-      if ( message[8..11] == "00D9" )
-      {
-         werror("CirclePlus reports %O\n",message[8..11]);
          send_next();
       }
       return;
@@ -164,19 +139,19 @@ void seperate_data( string message )
    string payload = message[24..(strlen(message)-5)];
    //Extract CRC
 #ifdef PW_PROTOCOL_DEBUG
-      werror("Received: %O\n",message);
+      werror("%d Received: %O\n",time(),message);
 #endif
-   //FIXME call_out, if non-blocking?
+   //FIXME call_out?
    low_receive_callback(macaddr, command, payload);
 
    //Answer received, reset the command timer and send next command
    send_next();
 }
 
-mapping pendingcommand = ([]);
-array transmitqueue = ({});
+protected mapping pendingcommand = ([]);
+protected array transmitqueue = ({});
 
-void send_command( string macaddress, string|int request, string|void data, int|void pos)
+protected void send_command( string macaddress, string|int request, string|void data, int|void pos)
 {
    string req = stringp(request)?request:sprintf("%04X",request);
    transmitqueue += ({ ([ "mac": macaddress, "request":req, "data": data?data:"", "pos":pos ]) });
@@ -190,7 +165,7 @@ protected void send_next()
    low_send();
 }
 
-void low_send()
+protected void low_send()
 {
    //Check if another command is pending.
    if( pendingcommand->time > time() )
@@ -199,6 +174,7 @@ void low_send()
    }
 
    remove_call_out(receive_timeout);
+
    //Check if another command is queued
    if( !sizeof( transmitqueue ) )
    {
@@ -231,19 +207,11 @@ void low_send()
                sprintf("%04X",Public.Crypto.CRC.CRC16X()->calcstring(
                                         datagram))+ FOOT);
 
-   //FIXME if ACK fails do next command.
-   if( ! blocking ) 
+   call_out( receive_timeout, COMMANDTIMEOUT );
+   if( sizeof(receive_buffer) )
    {
-      call_out( receive_timeout, COMMANDTIMEOUT );
-      if( sizeof(receive_buffer) )
-      {
-         call_out(low_answer,0,0,"");
-      }
+      call_out(low_answer,0,0,"");
    }
-  /*
-   else if ( commandcount )
-      wait_answer( commandcount );
-  */
 }
 
 void close()
@@ -253,176 +221,212 @@ void close()
    sock->close();
 }
 
-protected void receive_timeout( )
-{
-#ifdef PW_PROTOCOL_DEBUG
-   werror("Receive Timeout for Plug: %s\n",pendingcommand->mac);
-#endif
-   if( has_index ( Plugs, pendingcommand->mac ) )
-      Plugs[pendingcommand->mac]->offline();
-   //Send next command
-   send_next();
-}
-
-
-protected void low_receive_callback( string mac, int command, string data )
-{
-   switch(command)
+   protected void receive_timeout( )
    {
-      //A device wants to join us?
-      case 6:
-      {
-         werror("%s wants to join us\n",mac);
-         //We are greedy here, and add all
-         send_command(mac, 7, "01",1);
-      }
-      break;
-      case 29:
-      {
-         werror("%O\n",data); 
-         string mac = data[0..15];
-         int registered = (int) data[17];
-         if( registered == 1 && ! has_index( Plugs, mac ) )
-         {
-            Plugs[mac]= _Plug(mac, send_command, 0 );
-         }
-      }
-      break;
-      case 97:
-      {
-         //This is a new switch, send an info command
-         //The switch has received the join accept
-         send_command(mac, 35);
-      }
-      break;
-      case 79:
-      {
-         //The switch sends this, not sure what it wants to say.
-         //If we don't have the switch in our plug package, add it.
-         if( ! has_index( Plugs, mac ) )
-         {
-            switch(data)
-            {
-               //01 is a Circle+ should not happen? 02 is a Circle
-               case "01":
-               case "02":
-                  Plugs[mac]= _Plug(mac, send_command, 0 );
-                  break;
-               case "03":
-                  Plugs[mac]= _Switch(mac, send_command, 0 );
-                  break;
-            // The switch sometimes just sends 00 instead of 03.
-            //   default:
-            //      werror("Unknown Plug Type %s\n",data[40..41]);
-            }
-         }
-         else
-         {
-            Plugs[mac]->online = 1;
-            //Send an info command, in order to let it transmit de transmitqueue
-            Plugs[mac]->info();
-         }
-      }
-      break; 
-      case 17:
-      {
-         //Stick Init Return Command, contains Stick Mac, Circle+ Mac
-         StickMac = mac;
-         string maccircleplus;
-         sscanf(data,"%6*s%14s%*s",maccircleplus);
-         maccircleplus = "00" + maccircleplus;
-         CirclePlus = _Plug(maccircleplus, send_command, 1);
-         //CirclePlus->find_plugs();
-         Plugs[ maccircleplus] = CirclePlus;
-         break;
-      }
-      case 25:
-      {
-         sscanf(data,"%16s%*s",string maccircle);
-         if( !has_prefix(maccircle, "FFF") && !has_index(Plugs,maccircle ))
-         {
-            send_command( maccircle, 35 );
-            //Don't add the plug just jet, just send an info command
-            //Plugs[maccircle]= _Plug(maccircle, send_command, 0 );
-         }
-      }
-      break;
-      //Return from info command
-      case 36:
-      {
-         //If we get an info return, then the device must be in our network
-         //FIXME Check if this is a switch, scan or plug
-         if( ! has_index( Plugs, mac ) )
-         {
-         
-            switch(data[40..41])
-            {
-               //01 is a Circle+ should not happen? 02 is a Circle
-               case "01":
-               case "02":
-                  Plugs[mac]= _Plug(mac, send_command, 0 );
-                  break;
-               case "03":
-                  Plugs[mac]= _Switch(mac, send_command, 0 );
-                  break;
-               default:
-                  werror("Unknown Plug Type %s\n",data[40..41]);
-            }
-         }
-         else
-            Plugs[mac]->online = 1;
-         Plugs[mac]->receive_callback(command, data);
-      }
-      break;
-      default:
-      {
-         if( mac == StickMac )
-         {
-            werror("Received data for Unknown Command %d for Stick\n", command);
-            werror("Data %O\n",data);
-         }
-         if( !has_index( Plugs, mac ) )
-         {
-            CirclePlus->isregistered( mac );
-            return;
-         }
-         Plugs[mac]->receive_callback(command, data);
-       }
+   #ifdef PW_PROTOCOL_DEBUG
+      werror("Receive Timeout for Plug: %s\n",pendingcommand->mac);
+   #endif
+      if( has_index ( Plugs, pendingcommand->mac ) )
+         Plugs[pendingcommand->mac]->offline();
+      //Send next command
+      send_next();
    }
-}
-}
 
-_Stick `()(string port, int|void non_blocking ) 
+
+   protected void low_receive_callback( string mac, int command, string data )
+   {
+      switch(command)
+      {
+         //A device wants to join us?
+         case 6:
+         {
+            werror("%s wants to join us\n",mac);
+            //We are greedy here, and add all
+            send_command(mac, 7, "01",1);
+         }
+         break;
+         //Circle+ Response that Plug is Associated
+         case 29:
+         {
+            string mac = data[0..15];
+            int registered = (int) data[17];
+            if( registered == 1 && ! has_index( Plugs, mac ) )
+            {
+               Plugs[ mac ]= _Circle(mac, send_command);
+            }
+         }
+         break;
+         //Plug Acknowledges its Association
+         case 97:
+         {
+            //This is a new switch, send an info command
+            //The switch has received the join accept
+            send_command(mac, 35);
+         }
+         break;
+         //Switch / Scan / Sense Report Active RF
+         case 79:
+         {
+            //If not in our online database respond by requesting info.
+            if( ! has_index( Plugs, mac ) )
+            {
+               send_command(mac, 35);
+            }
+            else
+               Plugs[mac]->receive_callback(command, data);
+         }
+         break; 
+         //Stick Returns Circle+ MAC on 000A Init.
+         case 17:
+         {
+            //Stick Init Return Command, contains Stick Mac, Circle+ Mac
+            StickMac = mac;
+            string maccircleplus;
+            sscanf(data,"%6*s%14s%*s",maccircleplus);
+            maccircleplus = "00" + maccircleplus;
+            CirclePlus = _CirclePlus(maccircleplus, send_command);
+            //CirclePlus->find_plugs();
+            Plugs[ maccircleplus ] = CirclePlus;
+            break;
+         }
+         //Circle+ Returns Plug MAC if it is associated (and in reach?)
+         case 25:
+         {
+            sscanf(data,"%16s%*s",string maccircle);
+            if( !has_prefix(maccircle, "FFF") && !has_index(Plugs,maccircle ))
+            {
+               send_command( maccircle, 35 );
+            }
+         }
+         break;
+         //Return from info command
+         case 36:
+         {
+            //If we get an info return, then the device must be in our network
+            if( ! has_index( Plugs, mac ) )
+            {
+         
+               switch(data[40..41])
+               {
+                  //01 is a Circle+ should not happen? 02 is a Circle
+                  case "01":
+                     error("We received an info return from an unknown C+ ??\n");
+                     break;
+                  case "02":
+                     Plugs[mac]= _Circle(mac, send_command);
+                     break;
+                  case "03":
+                     Plugs[mac]= _Switch(mac, send_command, 0 );
+                     break;
+                  case "05":
+                     Plugs[mac]= _Sense(mac, send_command, 0 );
+                     break;
+                  case "06":
+                     Plugs[mac]= _Scan(mac, send_command, 0 );
+                     break;
+                  default:
+                     werror("Unknown Plug Type %s\n",data[40..41]);
+               }
+            }
+            else
+               Plugs[mac]->online = 1;
+            Plugs[mac]->receive_callback(command, data);
+         }
+         break;
+         default:
+         {
+            if( mac == StickMac )
+            {
+               werror("Received data for Unknown Command %d for Stick\n", command);
+               werror("Data %O\n",data);
+            }
+            if( !has_index( Plugs, mac ) )
+            {
+               CirclePlus->isregistered( mac );
+               return;
+            }
+            Plugs[mac]->receive_callback(command, data);
+          }
+      }
+   }
+   
+   mixed `[]( string PlugMac )
+   {
+      if ( has_index( Plugs, PlugMac ) )
+      {
+         Plugs[PlugMac]->info();
+         return Plugs[PlugMac];
+      }
+      //Software thinks we should know this plug, let's try and find it
+      send_command( PlugMac, 35 );
+   }
+
+   mixed `->( string PlugMac )
+   {
+      if ( has_index( Plugs, PlugMac ) )
+      {
+         Plugs[PlugMac]->info();
+         return Plugs[PlugMac];
+      }
+      //Software thinks we should know this plug, let's try and find it
+      send_command( PlugMac, 35 );
+   }
+
+   array _indices( object|void context, int|void access )
+   {
+      return indices(Plugs);
+   }
+
+   array _values ( object|void context, int|void access )
+   {
+      return values(Plugs);
+   }
+
+   int _sizeof()
+   {
+      return sizeof(Plugs);
+   }
+
+   int `!()
+   {
+      return 0;
+   }
+} //END _Stick
+
+
+//Initiate PlugWise as _Stick
+_Stick `()(string port ) 
 {
-   return _Stick( port, non_blocking );
+   return _Stick( port );
 }
 
-protected class _Plug
-{
 
+protected class _Circle
+{
+//! Callback function of the Stick to send commands.
 protected function send_command;
+//! Hardware Address of the Plug
 protected string mac;
-int type = PLUG;
-protected int circleplus = 0;
+constant type = CIRCLE;
+//! Calibration Values
 protected float gain_a=0.0,gain_b=0.0,offtot=0.0,offnoise=0.0;
-
+//! AC Frequency of the Powernet
 int netfrequency =  0;
 int powerstate = 0;
 int builddate = 0;
 int online = 0;
 protected int plugtime = 0;
 protected int lasttime = 0;
-
+protected int logclock = 0;
+//! Current Plug Pulse
 protected float pulse;
 
 string hwversion="";
-protected int logclock = 0;
-//Pointerr to the address of the current powerlog
+//Pointerr to the address of the current log
 protected int logpointer = 0;
-//Address of the last powerlog
+//Address of the last log
 int logaddress = 0;
-protected array last_powerlog = ({});
-protected function powerlog_callback = 0;
+protected function log_callback = 0;
 
 void close()
 {
@@ -441,14 +445,11 @@ void close()
 //! @param macaddress
 //! The mac address of the plug, either the 5 byte, 6 byte or
 //! full 16 byte mac works.
-void create(string macaddress, function _send_command, int|void plus)
+void create(string macaddress, function _send_command )
 {
    mac = macaddress;
    send_command = _send_command;
    info();
-   circleplus=plus;
-   if( plus )
-      find_plugs();   
 }
 
 protected int YMMtoUnix(string YMM)
@@ -460,13 +461,11 @@ protected int YMMtoUnix(string YMM)
    if(!month ||  month > 12 )
       return 0;
    return Calendar.Year(year)->set_timezone("GMT")->month(month)->minute(minutes)->unix_time();
-
 }
 
 protected void power_calibrate()
 {
    send_command(mac, 38 );
-   //sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
 }
 
 //! Retrieve the plug current clock in unix time.
@@ -491,21 +490,6 @@ void info()
    send_command(mac, 35 );
 } 
 
-//! Test command
-void test( int command, string|void extra )
-{
-
-   send_command(mac, command, stringp(extra)?extra:"" );
-
-}
-
-//! Check if the Circle Is Registered
-//!
-void isregistered( string reg_mac )
-{
-   send_command(mac, 28, reg_mac);
-}
-  
 protected float pulse_correction(int pulse, int timespan)
 {
    float pulses = pulse *1.0 / timespan;
@@ -535,51 +519,28 @@ protected float pulse_to_kwh(float pulse)
 //! the logaddress  which needs to be queried. The current logaddress
 //! is Plug->logaddress. This however points to the current not completed 
 //! log.
-void powerlog( int|void addr)
+void log( int|void addr)
 {
-   //info();
+   info();
    int log = zero_type(addr)?logpointer:addr;
    send_command(mac, 72,sprintf("%08X",(log*32+278528)));
 } 
 
-int powerlogpointer()
+int log_pointer()
 {
    info();
    return logpointer;
 }
 
-void set_powerlog_callback( function callback )
+void set_log_callback( function callback )
 {
-   powerlog_callback = callback;
+   log_callback = callback;
 }
 
-void remove_powerlog_callback()
+void remove_log_callback()
 {
-   powerlog_callback = 0;
+   log_callback = 0;
 }
-
-//! Find other Plugs in the Network
-//! Keep in mind this only works for the Circle+
-//!
-//! @returns
-//! array containing all found plugs. If non are found, or the plug is
-//! not a Circle+ an empty array is returned. 
-void find_plugs(string |void searchmac)
-{
-   if(!circleplus)
-      return;
-   if( stringp(searchmac) )
-   {
-      send_command(searchmac,35);
-      return;
-   }
-   int count;
-   array res=({});
-   for(count = 0; count <= 0x3F; count++)
-   {
-      send_command(mac, 24,sprintf("%02X",count));
-   }
-} 
 
 //! Switches the plug on.
 //! info() is called internally, to update the state. No acknowledge 
@@ -606,13 +567,19 @@ void receive_callback(int command, string data )
    online=1;
    switch( command )
    {
+   //This is an acknowledge
+   case 0:
+   {
+   }
+   break;
+   //Response with current pulses
    case 19:
    {
       int val=0,val1=0;
       sscanf(data,"%04x%04x",val,val1);
       pulse = pulse_correction(val, 1);
-      break;
    }
+   break;
    //return code from info() command.
    case 36:
    {
@@ -645,9 +612,11 @@ void receive_callback(int command, string data )
       power_calibrate();
    }
    break;
+   //Power Calibration Response
    case 39:
       sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
    break;
+   //Plug Clock Data Response (to 41) FIXME Check
    case 58:
    {
       int hour,minute,second,dow,dom,month,year;
@@ -658,6 +627,7 @@ void receive_callback(int command, string data )
 #endif
    }
    break;
+   //Plug Clock Data Response (to 62) FIXME Check
    case 63:
    {
       //I Suspect this is a logvalue for the software to set the last log-time.   
@@ -667,7 +637,7 @@ void receive_callback(int command, string data )
 #ifdef PW_PROTOCOL_DEBUG
       write("Plug Time: %d %d\n",plugtime,time(1)); 
 #endif
-      /*
+      /*FIXME should this be set in 58?
       if(abs(plugtime-time(1)) >= 60 )
       {
          mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
@@ -685,18 +655,19 @@ void receive_callback(int command, string data )
       */
    }
    break;
+   //Powerlog Response
    case 73:
    {
       array x = array_sscanf(data,"%8s%8x%8s%8x%8s%8x%8s%8x%8x");
       int logaddress = (x[8] - 278528) / 32;
-      array last_powerlog = ({ ([ "hour":YMMtoUnix(x[0]),"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
+      array log = ({ ([ "hour":YMMtoUnix(x[0]),"pulses":pulse_correction(x[1],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600)) ]), 
              ([ "hour":YMMtoUnix(x[2]),"pulses":pulse_correction(x[3],3600), "kwh": pulse_to_kwh(pulse_correction(x[3],3600) ) ]), 
              ([ "hour":YMMtoUnix(x[4]),"pulses":pulse_correction(x[5],3600), "kwh": pulse_to_kwh(pulse_correction(x[5],3600) ) ]), 
              ([ "hour":YMMtoUnix(x[6]),"pulses":pulse_correction(x[7],3600), "kwh": pulse_to_kwh(pulse_correction(x[7],3600) ) ]) });
-      if( powerlog_callback )
-         powerlog_callback( last_powerlog, logaddress );
-      break;
+      if( log_callback )
+         log_callback( log, logaddress );
    }
+   break;
    default:
    {
       werror("Received unknown command %d with data %O\n",command,data);
@@ -705,7 +676,6 @@ void receive_callback(int command, string data )
 }
 
 //! Returns the current powerload off the plug. 
-//! in nonblocking mode the last known value is returned.
 //! @param pulses
 //! when non-zero power returns the information in Pulses otherwise in Watt.
 //!  Watt = Pulses * 1000 / 468.9385193
@@ -716,9 +686,74 @@ float power( int|void pulses )
       send_command(mac, 18 );
       return pulses?pulse:pulse_to_watt(pulse);
 }
+} // End of Class Circle
+
+protected class _CirclePlus
+{
+   inherit _Circle;
+
+   constant type = CIRCLEPLUS;
+   //! Connect to a Plug in the PlugWise network.
+   //! Plugs have to be added to the network using the 
+   //! Microsoft windows tool provide by PlugWise B.V.
+   //! The Source.
+   //! 
+   //! @param port
+   //! The Protocol object returned from
+   //! earlier instantations of this PlugWise Network
+   //! make sure to reuse the Protocol object if possible
+   //! @param macaddress
+   //! The mac address of the plug, either the 5 byte, 6 byte or
+   //! full 16 byte mac works.
+   void create(string macaddress, function _send_command )
+   {
+      mac = macaddress;
+      send_command = _send_command;
+      info();
+      find_plugs();   
+   }
+
+   protected void FindNewPlugs(int|void timeout)
+   {
+      call_out(StopFindNewPlugs,timeout?timeout:300); 
+      send_command("",8,"01");
+   }
+
+   protected void StopFindNewPlugs()
+   {
+      send_command("",8,"00");
+   }
+
+   //! Check if the Circle Is Registered
+   //!
+   void isregistered( string reg_mac )
+   {
+      send_command(mac, 28, reg_mac);
+   }
+   //! Find other Plugs in the Network
+   //! Keep in mind this only works for the Circle+
+   //!
+   //! @returns
+   //! array containing all found plugs. If non are found, or the plug is
+   //! not a Circle+ an empty array is returned. 
+   void find_plugs( string|void searchmac)
+   {
+      if( stringp(searchmac) )
+      {
+         send_command(mac, 28, searchmac);
+         send_command(searchmac,35);
+         return;
+      }
+      int count;
+      array res=({});
+      for(count = 0; count <= 0x3F; count++)
+      {
+         send_command(mac, 24,sprintf("%02X",count));
+      }
+   }
 }
 
-protected class _Switch
+class _Switch
 {
 
 protected function send_command;
@@ -726,8 +761,8 @@ protected string mac;
 int type = SWITCH;
 int netfrequency =  0;
 
-int switchstate_1 = 0;
-int switchstate_2 = 0;
+int Switch1 = 0;
+int Switch2 = 0;
 
 int builddate = 0;
 
@@ -763,7 +798,7 @@ void info()
 
 protected function switch_callback;
 
-void set_switch_callback( int switchnr, function callback)
+void set_switch_callback( function callback)
 {
    switch_callback = callback;
 }
@@ -776,16 +811,16 @@ protected void send_queue()
    {
       send_command(mac,command->command, command->data);
    }
+   transmitqueue = ({});
 }
 
 void set_wakeup_timer( int wakeup, int timeout )
 {
    transmitqueue += ({ ([ "command":80,
-                          //FIXME What does the rest of this command mean?
-                          //FIXME timeout should be in this command?
-                          "data":sprintf("1%X00010003000000",wakeup)
+                          "data":sprintf("%02X0001%04X000000",timeout,wakeup)
                        ]) });
 }
+
 void receive_callback(int command, string data )
 {
    online = 1;
@@ -807,14 +842,26 @@ void receive_callback(int command, string data )
       }
       hwversion=data[20..31];
       sscanf(data[32..37],"%x",builddate);
+      //Since we're online, we can now transfer data we cached
+      send_queue();
    }
-   //Since we're online, we can now transfer data we cached
-   send_queue();
    break;
+   //RF Wakeup Call
+   case 79:
+   {
+      send_queue();
+   }
+   break;
+   //Switch Pressed Broadcast
    case 86:
    {
       sscanf(data,"%2x%2x", int switchnr, int onoff);
-      switch_callback(switchnr,onoff); 
+      if( switchnr == 1)
+         Switch1 = onoff;
+      else
+         Switch2 = onoff;
+      if ( switch_callback )
+         switch_callback(switchnr,onoff); 
    }
    break;
    default:
@@ -825,4 +872,344 @@ void receive_callback(int command, string data )
 
 }
 
+} //End of Class _Switch
+
+class _Sense
+{
+#define HUMOFFSET 3145
+#define TEMPOFFSET 17473
+#define HUMDIV 524.30
+#define TEMPDIV 372.90
+
+protected function send_command;
+protected string mac;
+int type = SWITCH;
+int netfrequency =  0;
+int builddate = 0;
+string hwversion="";
+int online = 0;
+int Switch1 = 0;
+float Humidity = 0.0;
+float Temperature = 0.0;
+
+//Pointerr to the address of the current log
+protected int logpointer = 0;
+//Address of the last log
+int logaddress = 0;
+protected function log_callback = 0;
+
+void close()
+{
+   destruct(this);
 }
+
+void create(string macaddress, function _send_command)
+{
+   mac = macaddress;
+   send_command = _send_command;
+   info();
+}
+
+void offline()
+{
+   online = 0;
+}
+
+//! Refresh the Plug info. No data is returned here, only the internal
+//! representation of the Plug status like online,powerstate,time
+//! net frequency and hardware version are recollected from the plug.
+void info()
+{
+   transmitqueue += ({ ([ "command":35,
+                          "data":""
+                       ]) });
+} 
+
+protected int YMMtoUnix(string YMM)
+{
+   //Format is Year_Month_MonthMinute
+   int year, month, minutes;
+   sscanf(YMM,"%2x%2x%4x",year,month,minutes);
+   year+=2000;
+   if(!month ||  month > 12 )
+      return 0;
+   return Calendar.Year(year)->set_timezone("GMT")->month(month)->minute(minutes)->unix_time();
+}
+
+//! @param addr
+//! the logaddress  which needs to be queried. The current logaddress
+//! is Plug->logaddress. This however points to the current not completed 
+//! log.
+void log( int|void addr)
+{
+   info();
+   int log = zero_type(addr)?logpointer:addr;
+   transmitqueue += ({ ([ "command":72,
+                          "data":sprintf("%08X",(log*32+278528))
+                       ]) });
+} 
+
+int log_pointer()
+{
+   info();
+   return logpointer;
+}
+
+void set_log_callback( function callback )
+{
+   log_callback = callback;
+}
+
+void remove_log_callback()
+{
+   log_callback = 0;
+}
+
+protected function switch_callback;
+
+void set_switch_callback( function callback)
+{
+   switch_callback = callback;
+}
+
+protected array(mapping)  transmitqueue = ({});
+
+protected void send_queue()
+{
+   foreach ( transmitqueue, mapping command )
+   {
+      send_command(mac,command->command, command->data);
+   }
+   transmitqueue = ({});
+}
+
+void set_wakeup_timer( int wakeup, int timeout )
+{
+   transmitqueue += ({ ([ "command":80,
+                          "data":sprintf("%02X0001%04X000000",timeout,wakeup)
+                       ]) });
+}
+
+void set_temperature_switch ( float low, float high, int interval )
+{
+   transmitqueue += ({ ([ "command":259,
+                          "data":sprintf("%2X",(int) interval)
+                       ]), 
+                       ([ "command":260,
+                          "data":sprintf("01%04X01%04X00",(int) (low*TEMPDIV)+TEMPOFFSET,(int) (high*372.90)+17473)
+                       ]) });
+
+}
+
+
+void set_humidity_switch ( float low, float high, int interval )
+{
+   transmitqueue += ({ ([ "command":259,
+                          "data":sprintf("%2X",(int) interval)
+                       ]), 
+                       ([ "command":260,
+                          "data":sprintf("00%04X01%04X00",(int) (low*HUMDIV)+HUMOFFSET,(int) (high*524.30)+3145)
+                       ]) 
+                       });
+}
+
+void receive_callback(int command, string data )
+{
+   online = 1;
+   switch( command )
+   {
+   //return code from info() command.
+   case 36:
+   {
+      switch(data[18..19])
+      {
+      case "85":
+         netfrequency=50;
+         break;
+      case "C5":
+         netfrequency=60;
+         break;
+      default:
+         netfrequency=0;
+      }
+      hwversion=data[20..31];
+      sscanf(data[32..37],"%x",builddate);
+      //Since we're online, we can now transfer data we cached
+      send_queue();
+   }
+   break;
+   //log Response
+   case 73:
+   {
+      array x = array_sscanf(data,"%8s%4x%4x%8s%4x%4x%8s%4x%4x%8s%4x%4x%8x");
+      int logaddress = (x[12] - 278528) / 32;
+      array log = ({ 
+                     ([ "hour":YMMtoUnix(x[0]),
+                        "humidity": (x[1]-HUMOFFSET)/HUMDIV,
+                        "temperature": (x[2]-TEMPOFFSET)/TEMPDIV ]), 
+                     ([ "hour":YMMtoUnix(x[3]),
+                        "humidity": (x[4]-HUMOFFSET)/HUMDIV,
+                        "temperature": (x[5]-TEMPOFFSET)/TEMPDIV ]), 
+                     ([ "hour":YMMtoUnix(x[6]),
+                        "humidity": (x[7]-HUMOFFSET)/HUMDIV,
+                        "temperature": (x[8]-TEMPOFFSET)/TEMPDIV ]), 
+                     ([ "hour":YMMtoUnix(x[9]),
+                        "humidity": (x[10]-HUMOFFSET)/HUMDIV,
+                        "temperature": (x[11]-TEMPOFFSET)/TEMPDIV ]), 
+                  });
+      if( log_callback )
+         log_callback( log, logaddress );
+   }
+   break;
+   //RF Wakeup Call
+   case 79:
+   {
+      send_queue();
+   }
+   break;
+   //Sense Switch Broadcast
+   case 86:
+   {
+      sscanf(data,"%2x%2x", int switchnr, int onoff);
+      if ( switch_callback )
+         switch_callback(switchnr,onoff); 
+      Switch1 = onoff;
+   }
+   break;
+   //Acknowledge of some sort not sure
+   case 256:
+   {
+      //Data is mostly 00B3 or 00B5 not sure what to do with it.
+   }
+   break;
+   //Scan Data
+   case 261:
+   {
+      sscanf(data,"%4x%4x",int hum,int temp);
+      Humidity = (hum - HUMOFFSET) / HUMDIV;
+      Temperature = (temp - TEMPOFFSET ) / TEMPDIV;
+   }
+   break;
+   default:
+   {
+      werror("Received unknown command %d with data %O\n",command,data);
+   }
+   }
+
+}
+
+} //End of Class _Sense
+
+protected class _Scan
+{
+
+protected function send_command;
+protected string mac;
+int type = SWITCH;
+int netfrequency =  0;
+string hwversion="";
+int builddate = 0;
+int online = 0;
+int Switch1 = 0;
+
+void close()
+{
+   destruct(this);
+}
+
+void create(string macaddress, function _send_command)
+{
+   mac = macaddress;
+   send_command = _send_command;
+   info();
+}
+
+void offline()
+{
+   online = 0;
+}
+
+//! Refresh the Plug info. No data is returned here, only the internal
+//! representation of the Plug status like online,powerstate,time
+//! net frequency and hardware version are recollected from the plug.
+void info()
+{
+   transmitqueue += ({ ([ "command":35,
+                          "data":""
+                       ]) });
+} 
+
+
+protected array(mapping)  transmitqueue = ({});
+
+protected function switch_callback;
+
+void set_switch_callback( function callback)
+{
+   switch_callback = callback;
+}
+
+protected void send_queue()
+{
+   foreach ( transmitqueue, mapping command )
+   {
+      send_command(mac,command->command, command->data);
+   }
+   transmitqueue = ({});
+}
+
+void set_wakeup_timer( int wakeup, int timeout )
+{
+   transmitqueue += ({ ([ "command":80,
+                          "data":sprintf("%02X0001%04X000000",timeout,wakeup)
+                       ]) });
+}
+
+void receive_callback(int command, string data )
+{
+   online = 1;
+   switch( command )
+   {
+   //return code from info() command.
+   case 36:
+   {
+      switch(data[18..19])
+      {
+      case "85":
+         netfrequency=50;
+         break;
+      case "C5":
+         netfrequency=60;
+         break;
+      default:
+         netfrequency=0;
+      }
+      hwversion=data[20..31];
+      sscanf(data[32..37],"%x",builddate);
+      //Since we're online, we can now transfer data we cached
+      send_queue();
+   }
+   break;
+   //RF Wakeup Call
+   case 79:
+   {
+      send_queue();
+   }
+   break;
+   case 86:
+   {
+      sscanf(data,"%2x%2x", int switchnr, int onoff);
+      if ( switch_callback )
+         switch_callback(switchnr,onoff); 
+      Switch1 = onoff;
+   }
+   break;
+   default:
+   {
+      werror("Received unknown command %d with data %O\n",command,data);
+   }
+   }
+
+}
+
+} //End of Class _Switch
