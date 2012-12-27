@@ -29,7 +29,7 @@ protected class _Stick
 
 #define HEAD "\5\5\3\3"
 #define FOOT "\r\n"
-#define PW_PROTOCOL_DEBUG
+#define PPW_PROTOCOL_DEBUG
 #define PPW_PROTOCOL_DEBUG_LOW
 #define RESEND 1
 #define COMMANDTIMEOUT 1
@@ -363,6 +363,11 @@ void close()
 
    mixed `->( string PlugMac )
    {
+      if ( PlugMac == "CirclePlus" )
+      {
+         return CirclePlus;
+      }
+
       if ( has_index( Plugs, PlugMac ) )
       {
          Plugs[PlugMac]->info();
@@ -691,6 +696,7 @@ float power( int|void pulses )
 protected class _CirclePlus
 {
    inherit _Circle;
+   int PlugFindActive = 0;
 
    constant type = CIRCLEPLUS;
    //! Connect to a Plug in the PlugWise network.
@@ -711,16 +717,18 @@ protected class _CirclePlus
       send_command = _send_command;
       info();
       find_plugs();   
-   }
+   } 
 
-   protected void FindNewPlugs(int|void timeout)
+   void FindNewPlugs(int|void timeout)
    {
       call_out(StopFindNewPlugs,timeout?timeout:300); 
+      PlugFindActive = 1;
       send_command("",8,"01");
    }
 
    protected void StopFindNewPlugs()
    {
+      PlugFindActive = 0;
       send_command("",8,"00");
    }
 
@@ -883,7 +891,7 @@ class _Sense
 
 protected function send_command;
 protected string mac;
-int type = SWITCH;
+int type = SENSE;
 int netfrequency =  0;
 int builddate = 0;
 string hwversion="";
@@ -1105,7 +1113,7 @@ protected class _Scan
 
 protected function send_command;
 protected string mac;
-int type = SWITCH;
+int type = SCAN;
 int netfrequency =  0;
 string hwversion="";
 int builddate = 0;
