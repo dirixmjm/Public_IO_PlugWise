@@ -305,7 +305,9 @@ void close()
             //If we get an info return, then the device must be in our network
             if( ! has_index( Plugs, mac ) )
             {
-         
+#ifdef PW_PROTOCOL_DEBUG
+               werror("Type %O\n",data[40..41]); 
+#endif
                switch(data[40..41])
                {
                   //01 is a Circle+ should not happen? 02 is a Circle
@@ -358,6 +360,7 @@ void close()
          return Plugs[PlugMac];
       }
       //Software thinks we should know this plug, let's try and find it
+      CirclePlus->isregistered( PlugMac );
       send_command( PlugMac, 35 );
    }
 
@@ -379,6 +382,7 @@ void close()
 
    array _indices( object|void context, int|void access )
    {
+      CirclePlus->find_plugs();
       return indices(Plugs);
    }
 
@@ -1072,6 +1076,8 @@ void receive_callback(int command, string data )
    //RF Wakeup Call
    case 79:
    {
+      if ( data == "00" )
+         info();
       send_queue();
    }
    break;
