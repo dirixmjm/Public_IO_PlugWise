@@ -284,6 +284,7 @@ void close()
             string maccircleplus;
             sscanf(data,"%6*s%14s%*s",maccircleplus);
             maccircleplus = "00" + maccircleplus;
+//            werror("C+ %s\n",maccircleplus);
             CirclePlus = _CirclePlus(maccircleplus, send_command);
             //CirclePlus->find_plugs();
             Plugs[ maccircleplus ] = CirclePlus;
@@ -318,13 +319,13 @@ void close()
                      Plugs[mac]= _Circle(mac, send_command);
                      break;
                   case "03":
-                     Plugs[mac]= _Switch(mac, send_command, 0 );
+                     Plugs[mac]= _Switch(mac, send_command );
                      break;
                   case "05":
-                     Plugs[mac]= _Sense(mac, send_command, 0 );
+                     Plugs[mac]= _Sense(mac, send_command );
                      break;
                   case "06":
-                     Plugs[mac]= _Scan(mac, send_command, 0 );
+                     Plugs[mac]= _Scan(mac, send_command );
                      break;
                   default:
                      werror("Unknown Plug Type %s\n",data[40..41]);
@@ -482,7 +483,8 @@ protected void power_calibrate()
 //! synchronize clock before returning
 void clock( )
 {
-   string data = send_command(mac, 62, "" );
+   //send_command(mac, 41 );
+   send_command(mac, 62 );
 }
 
 void offline()
@@ -625,12 +627,34 @@ void receive_callback(int command, string data )
    case 39:
       sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
    break;
-   //Plug Clock Data Response (to 41) FIXME Check
+   //Plug Clock Data Response (to 41)
    case 58:
    {
       int hour,minute,second,dow,dom,month,year;
       sscanf(data,"%2d%2d%2d%2d%2d%2d%2d",second,minute,hour,dow,dom,month,year);
-      plugtime = Calendar.parse("%s-%m-%h-%e-%D-%M-%y",sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year))->unix_time();;
+      if (year != 0 )
+      {
+        plugtime = Calendar.parse("%s-%m-%h-%e-%D-%M-%y",sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year))->unix_time();
+        werror("%s %d\n",mac,plugtime);
+      }
+      else
+        werror("%s %s\n",mac,sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year));
+
+      /*if(abs(plugtime-time()) >= 60 )
+      {
+         werror("Here %d %d\n",plugtime,time());
+         mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
+         int yr = cdate->year-2000;
+         int month_minute = (cdate->day-1)*24*60+cdate->hour*60+cdate->minute;
+         string towrite = sprintf("%02X%02X%04XFFFFFFFF%02X%02X%02X%02X",
+                                  yr,cdate->month,month_minute,
+                                  cdate->hour,cdate->minute,cdate->second,
+                                  cdate->week_day);
+         send_command(mac, 22, towrite);
+         //Re-read the plug clock
+         //info();
+         //clock();
+      }*/
 #ifdef PW_PROTOCOL_DEBUG
       write("Plug Time: %d %d\n",plugtime,time(1)); 
 #endif
@@ -643,25 +667,10 @@ void receive_callback(int command, string data )
       int hour,minute,second,dow;
       sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
       lasttime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
+      werror("lasttime %s %d %d\n",mac,lasttime,time());
 #ifdef PW_PROTOCOL_DEBUG
       write("Plug Time: %d %d\n",plugtime,time(1)); 
 #endif
-      /*FIXME should this be set in 58?
-      if(abs(plugtime-time(1)) >= 60 )
-      {
-         mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
-         int yr = cdate->year-2000;
-         int month_minute = (cdate->day-1)*24*60+cdate->hour*60+cdate->minute;
-         string towrite = sprintf("%02X%02X%04XFFFFFFFF%02X%02X%02X%02X",
-                                  yr,cdate->month,month_minute,
-                                  cdate->hour,cdate->minute,cdate->second,
-                                  cdate->week_day);
-         string data = Stick->send_command(mac, 22, towrite);
-         //Re-read the plug clock
-         info();
-         clock();
-      }
-      */
    }
    break;
    //Powerlog Response
