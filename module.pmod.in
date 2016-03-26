@@ -667,9 +667,8 @@ void receive_callback(int command, string data )
       int hour,minute,second,dow;
       sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
       lasttime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
-      werror("lasttime %s %d %d\n",mac,lasttime,time());
 #ifdef PW_PROTOCOL_DEBUG
-      write("Plug Time: %d %d\n",plugtime,time(1)); 
+      werror("plug time %s %d %d\n",mac,lasttime,time());
 #endif
    }
    break;
