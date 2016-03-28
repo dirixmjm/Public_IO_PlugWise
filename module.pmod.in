@@ -425,8 +425,8 @@ int netfrequency =  0;
 int powerstate = 0;
 int builddate = 0;
 int online = 0;
-protected int plugtime = 0;
-protected int lasttime = 0;
+int plugtime = 0;
+int circleplustime = 0;
 protected int logclock = 0;
 //! Current Plug Pulse
 protected float pulse;
@@ -483,13 +483,25 @@ protected void power_calibrate()
 }
 
 //! Retrieve the plug current clock in unix time.
-//! @param sync
-//! synchronize clock before returning
 void clock( )
 {
-   //send_command(mac, 41 );
+   //Retrieve PLUGTIME
    send_command(mac, 62 );
 }
+
+//! Set the plug clock to current timestamp.
+void set_clock()
+{
+  mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
+  int yr = cdate->year-2000;
+  int month_minute = (cdate->day-1)*24*60+cdate->hour*60+cdate->minute;
+  string towrite = sprintf("%02X%02X%04XFFFFFFFF%02X%02X%02X%02X",
+                        yr,cdate->month,month_minute,
+                        cdate->hour,cdate->minute,cdate->second,
+                        cdate->week_day);
+  send_command(mac, 22, towrite);
+}
+
 
 void offline()
 {
@@ -623,7 +635,7 @@ void receive_callback(int command, string data )
       case "00":
          powerstate=0;
       }
-      clock();
+      //clock();
       power_calibrate();
    }
    break;
@@ -631,48 +643,41 @@ void receive_callback(int command, string data )
    case 39:
       sscanf(String.hex2string(data),"%4F%4F%4F%4F",gain_a,gain_b,offtot,offnoise);
    break;
-   //Plug Clock Data Response (to 41)
+   //Plug Clock Data Response (to 41) circlelpus only return content
    case 58:
    {
-      int hour,minute,second,dow,dom,month,year;
-      sscanf(data,"%2d%2d%2d%2d%2d%2d%2d",second,minute,hour,dow,dom,month,year);
-      if (year != 0 )
+      if ( type != CIRCLEPLUS )
       {
-        plugtime = Calendar.parse("%s-%m-%h-%e-%D-%M-%y",sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year))->unix_time();
-        werror("%s %d\n",mac,plugtime);
-      }
-      else
-        werror("%s %s\n",mac,sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year));
-
-      /*if(abs(plugtime-time()) >= 60 )
-      {
-         werror("Here %d %d\n",plugtime,time());
-         mapping cdate = Calendar.now()->set_timezone("GMT")->datetime();
-         int yr = cdate->year-2000;
-         int month_minute = (cdate->day-1)*24*60+cdate->hour*60+cdate->minute;
-         string towrite = sprintf("%02X%02X%04XFFFFFFFF%02X%02X%02X%02X",
-                                  yr,cdate->month,month_minute,
-                                  cdate->hour,cdate->minute,cdate->second,
-                                  cdate->week_day);
-         send_command(mac, 22, towrite);
-         //Re-read the plug clock
-         //info();
-         //clock();
-      }*/
 #ifdef PW_PROTOCOL_DEBUG
-      write("Plug Time: %d %d\n",plugtime,time(1)); 
+        write("Received 58 from non-circleplus\n");
+#endif
+        return;
+      }
+      int hour,minute,second,dow,dom,month,year;
+      int scan = sscanf(data,"%2d%2d%2d%2d%2d%2d%2d",second,minute,hour,dow,dom,month,year);
+      if ( scan < 7 )
+      {
+        plugtime = -1;
+#ifdef PW_PROTOCOL_DEBUG
+        write("plug time 58:%s datascan failed %s\n",mac,data);
+#endif
+        return;
+      }
+      circleplustime = Calendar.parse("%s-%m-%h-%e-%D-%M-%y",sprintf("%02d-%02d-%02d-%02d-%02d-%02d-%02d",second,minute,hour,dow,dom,month,year))->unix_time();
+
+#ifdef PW_PROTOCOL_DEBUG
+      write("Plug Time: %d %d\n",circleplustime,time(1)); 
 #endif
    }
    break;
-   //Plug Clock Data Response (to 62) FIXME Check
+   //Plug Clock Data Response (to 62) return the current plug time
    case 63:
    {
-      //I Suspect this is a logvalue for the software to set the last log-time.   
       int hour,minute,second,dow;
       sscanf(data[..7],"%2x%2x%2x%2x",hour,minute,second,dow);
-      lasttime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
+      plugtime = Calendar.Second("unix", logclock)->set_timezone("GMT")->day()->hour(hour)->minute(minute)->second(second)->unix_time();
 #ifdef PW_PROTOCOL_DEBUG
-      werror("plug time %s %d %d\n",mac,lasttime,time());
+      werror("plug time %s %d %d\n",mac,plugtime,time());
 #endif
    }
    break;
@@ -774,6 +779,16 @@ protected class _CirclePlus
       {
          send_command(mac, 24,sprintf("%02X",count));
       }
+   }
+
+   //! Retrieve the plug current clock in unix time.
+   //! @param sync
+   //! synchronize clock before returning
+   void clock( )
+   {
+      //Als get CIRCLEPLUSTIME
+      send_command(mac, 41 );
+      send_command(mac, 62 );
    }
 }
 
