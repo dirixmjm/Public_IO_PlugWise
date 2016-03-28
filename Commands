@@ -23,10 +23,10 @@ Write		0023	35	Request Plug Base Info
 Read		0024	36	Return data for Base Info Command
 Write		0026	38	Request Power Calibration Data
 Read		0027	39	Response Power Calibration Data
-Write		0029	41	Request Clock Data
-Read		003A	58	Plug Clock Data
-Write		003E	62	Request Plug Clock Setting
-Read		003F	63	Response Plug Clock 
+Write		0029	41	Request Circle Plus Clock Data
+Read		003A	58	Circle Plus Clock Data Response
+Write		003E	62	Request Plug Clock Data
+Read		003F	63	Plug Clock Data Response 
 Write		0040    64	??
                                 data:0001
 Write		0045	69	Add switch broadcast to Plug, send twice
